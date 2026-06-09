@@ -1,6 +1,6 @@
 ---
 name: trender
-version: "0.1.3"
+version: "0.1.4"
 description: "Map how a topic is evolving across flexible time windows using last30days-style multi-source research plus trend scoring and HTML trend maps."
 argument-hint: 'trender "agentic AI" --days=90 | trender "MCP servers" --compare=7,30 | trender "AI coding agents" --from=2026-01-01 --to=2026-06-01 --emit=html'
 allowed-tools: Bash, Read, Write, AskUserQuestion, WebSearch
@@ -59,9 +59,13 @@ Run the engine script from this skill directory:
 python3 "$SKILL_DIR/scripts/trender.py" "agentic AI" --days=90 --emit=md
 python3 "$SKILL_DIR/scripts/trender.py" "agentic AI" --compare=7,30 --emit=html
 python3 "$SKILL_DIR/scripts/trender.py" "MCP servers" --from=2026-01-01 --to=2026-06-01 --emit=json
+python3 "$SKILL_DIR/scripts/trender.py" --diagnose
+python3 "$SKILL_DIR/scripts/trender.py" setup
 ```
 
 Trender ships with a compatible `last30days` engine under `vendor/last30days`, so no separate install is required for normal use.
+
+Run `trender.py setup` once to let the bundled last30days engine discover browser cookies and write `~/.config/last30days/.env`. Run `trender.py --diagnose` to see which sources are currently available.
 
 If you want to override the bundled engine, set:
 

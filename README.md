@@ -46,6 +46,13 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 Trender includes its own compatible `last30days` engine under `skills/trender/vendor/last30days`, so no separate install is required for normal use:
 
 ```powershell
+python .\skills\trender\scripts\trender.py --diagnose
+python .\skills\trender\scripts\trender.py setup
+```
+
+`--diagnose` shows which sources are currently available. `setup` runs the bundled `last30days` setup flow, which can discover browser cookies and write `~/.config/last30days/.env`.
+
+```powershell
 python .\skills\trender\scripts\trender.py "agentic AI" `
   --compare=7,30 `
   --emit=all
@@ -62,6 +69,8 @@ Then run:
 ```powershell
 python .\skills\trender\scripts\trender.py "MCP servers" --days=90 --emit=html
 ```
+
+To intentionally bypass the upstream preflight checks, pass `--skip-last30days-preflight`.
 
 ## Build skill archive
 

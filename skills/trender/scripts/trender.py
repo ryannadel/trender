@@ -24,7 +24,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 
 
 @dataclass(frozen=True)
@@ -63,7 +63,7 @@ class TrendTheme:
 def main() -> int:
     configure_stdio()
     parser = argparse.ArgumentParser(description="Map topic trends using last30days evidence.")
-    parser.add_argument("topic", nargs="+", help="Topic to analyze")
+    parser.add_argument("topic", nargs="*", help="Topic to analyze, or 'setup' to configure bundled last30days")
     parser.add_argument("--days", type=int, default=30, help="Lookback window in days. Default: 30.")
     parser.add_argument("--from", dest="start", help="Explicit start date YYYY-MM-DD.")
     parser.add_argument("--to", dest="end", help="Explicit end date YYYY-MM-DD.")
@@ -79,11 +79,25 @@ def main() -> int:
     parser.add_argument("--deep", action="store_true", help="Pass --deep through to last30days.")
     parser.add_argument("--mock", action="store_true", help="Use last30days mock retrieval fixtures.")
     parser.add_argument("--keep-raw", action="store_true", help="Save raw last30days JSON beside Trender outputs.")
+    parser.add_argument("--diagnose", action="store_true", help="Show bundled last30days source/provider availability.")
+    parser.add_argument(
+        "--skip-last30days-preflight",
+        action="store_true",
+        help="Bypass last30days preflight checks. Use only when you intentionally want to skip setup/gates.",
+    )
     args = parser.parse_args()
 
     topic = " ".join(args.topic).strip()
+    skill_dir = Path(__file__).resolve().parents[1]
+    last30days_dir = resolve_last30days_dir(args.last30days_dir, skill_dir)
+
+    if args.diagnose:
+        return run_last30days_passthrough(last30days_dir, ["--diagnose"])
+    if topic.lower() == "setup":
+        return run_last30days_passthrough(last30days_dir, ["setup"])
+
     if not topic:
-        raise SystemExit("topic is required")
+        raise SystemExit("topic is required, or run: trender.py setup / trender.py --diagnose")
 
     analysis_end = parse_date(args.end) if args.end else date.today()
     if args.start:
@@ -102,8 +116,6 @@ def main() -> int:
         + [max(1, (date.today() - window.start).days + 1) for window in compare_windows]
     )
 
-    skill_dir = Path(__file__).resolve().parents[1]
-    last30days_dir = resolve_last30days_dir(args.last30days_dir, skill_dir)
     raw_report = run_last30days(
         last30days_dir=last30days_dir,
         topic=topic,
@@ -112,6 +124,7 @@ def main() -> int:
         quick=args.quick,
         deep=args.deep,
         mock=args.mock,
+        skip_preflight=args.skip_last30days_preflight,
     )
     evidence = flatten_evidence(raw_report)
     clusters = raw_report.get("clusters", [])
@@ -163,6 +176,16 @@ def main() -> int:
     return 0
 
 
+def run_last30days_passthrough(last30days_dir: Path, args: list[str]) -> int:
+    cmd = [
+        resolve_python_for_last30days(),
+        str(last30days_dir / "scripts" / "last30days.py"),
+        *args,
+    ]
+    proc = subprocess.run(cmd, cwd=str(last30days_dir), env=os.environ.copy(), check=False)
+    return proc.returncode
+
+
 def configure_stdio() -> None:
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
@@ -204,6 +227,7 @@ def run_last30days(
     quick: bool,
     deep: bool,
     mock: bool,
+    skip_preflight: bool,
 ) -> dict[str, Any]:
     plan_path = write_trender_plan(topic)
     cmd = [
@@ -225,7 +249,8 @@ def run_last30days(
         cmd.append("--mock")
 
     env = os.environ.copy()
-    env.setdefault("LAST30DAYS_SKIP_PREFLIGHT", "1")
+    if skip_preflight:
+        env["LAST30DAYS_SKIP_PREFLIGHT"] = "1"
     try:
         proc = subprocess.run(
             cmd,
