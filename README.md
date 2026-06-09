@@ -2,7 +2,7 @@
 
 Trender is a coding-agent skill that maps how a topic evolves across flexible time windows.
 
-It uses a broad `last30days`-style research substrate for multi-source evidence, then adds Trender-specific analysis:
+It bundles a compatible `last30days` engine for broad multi-source evidence retrieval, then adds Trender-specific analysis:
 
 - flexible lookback windows and explicit date ranges
 - comparison windows such as 7 vs 30 days
@@ -43,16 +43,15 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 
 ## Run locally
 
-Install or clone `last30days-skill`, then point Trender at it:
+Trender includes its own compatible `last30days` engine under `skills/trender/vendor/last30days`, so no separate install is required for normal use:
 
 ```powershell
 python .\skills\trender\scripts\trender.py "agentic AI" `
   --compare=7,30 `
-  --last30days-dir C:\Users\rynadel\last30days-skill-src\skills\last30days `
   --emit=all
 ```
 
-Or set:
+To override the bundled engine with another checkout, set:
 
 ```powershell
 $env:LAST30DAYS_SKILL_DIR="C:\Users\rynadel\last30days-skill-src\skills\last30days"

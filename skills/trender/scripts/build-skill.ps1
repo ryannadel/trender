@@ -8,7 +8,11 @@ New-Item -ItemType Directory -Force -Path $Dist | Out-Null
 $Stage = Join-Path ([System.IO.Path]::GetTempPath()) ("trender-skill-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
 Copy-Item (Join-Path $SkillDir "SKILL.md") $Stage -Force
+Copy-Item (Join-Path $SkillDir "README.md") $Stage -Force
 Copy-Item (Join-Path $SkillDir "scripts") $Stage -Recurse -Force
+if (Test-Path (Join-Path $SkillDir "vendor")) {
+    Copy-Item (Join-Path $SkillDir "vendor") $Stage -Recurse -Force
+}
 Get-ChildItem -Path $Stage -Recurse -Directory -Filter "__pycache__" |
     Remove-Item -Recurse -Force
 Get-ChildItem -Path $Stage -Recurse -File -Include "*.pyc", "*.pyo" |

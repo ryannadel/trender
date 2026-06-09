@@ -13,6 +13,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 from collections import Counter, defaultdict
@@ -172,6 +173,7 @@ def resolve_last30days_dir(configured: str | None, skill_dir: Path) -> Path:
         candidates.append(Path(configured).expanduser())
     candidates.extend(
         [
+            skill_dir / "vendor" / "last30days",
             skill_dir.parent / "last30days",
             Path.home() / ".claude" / "skills" / "last30days",
             Path.home() / ".codex" / "skills" / "last30days",
@@ -184,7 +186,8 @@ def resolve_last30days_dir(configured: str | None, skill_dir: Path) -> Path:
             return candidate
     checked = "\n".join(f"  - {path}" for path in candidates)
     raise SystemExit(
-        "Could not find last30days skill engine. Install last30days or set LAST30DAYS_SKILL_DIR.\n"
+        "Could not find last30days skill engine. The packaged vendor copy may be missing; "
+        "rebuild/reinstall Trender or set LAST30DAYS_SKILL_DIR.\n"
         f"Checked:\n{checked}"
     )
 
@@ -200,7 +203,7 @@ def run_last30days(
     mock: bool,
 ) -> dict[str, Any]:
     cmd = [
-        sys.executable,
+        resolve_python_for_last30days(),
         str(last30days_dir / "scripts" / "last30days.py"),
         topic,
         "--emit=json",
@@ -235,6 +238,54 @@ def run_last30days(
             f"STDERR:\n{proc.stderr}\nSTDOUT:\n{proc.stdout[-4000:]}"
         )
     return parse_json_from_mixed_output(proc.stdout)
+
+
+def resolve_python_for_last30days() -> str:
+    configured = os.getenv("TRENDER_LAST30DAYS_PYTHON")
+    candidates = [configured] if configured else []
+    candidates.extend(
+        [
+            sys.executable,
+            shutil.which("python3.13"),
+            shutil.which("python3.12"),
+            shutil.which("python3"),
+            shutil.which("python"),
+        ]
+    )
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        if python_version_at_least(candidate, 3, 12):
+            return candidate
+    raise SystemExit(
+        "last30days requires Python 3.12+. Set TRENDER_LAST30DAYS_PYTHON to a Python 3.12+ executable."
+    )
+
+
+def python_version_at_least(executable: str, major: int, minor: int) -> bool:
+    try:
+        proc = subprocess.run(
+            [
+                executable,
+                "-c",
+                "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return False
+    if proc.returncode != 0:
+        return False
+    try:
+        found_major, found_minor = (int(part) for part in proc.stdout.strip().split(".", 1))
+    except ValueError:
+        return False
+    return (found_major, found_minor) >= (major, minor)
 
 
 def parse_json_from_mixed_output(output: str) -> dict[str, Any]:

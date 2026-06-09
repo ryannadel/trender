@@ -61,7 +61,9 @@ python3 "$SKILL_DIR/scripts/trender.py" "agentic AI" --compare=7,30 --emit=html
 python3 "$SKILL_DIR/scripts/trender.py" "MCP servers" --from=2026-01-01 --to=2026-06-01 --emit=json
 ```
 
-If the `last30days` skill is installed somewhere non-standard, set:
+Trender ships with a compatible `last30days` engine under `vendor/last30days`, so no separate install is required for normal use.
+
+If you want to override the bundled engine, set:
 
 ```bash
 export LAST30DAYS_SKILL_DIR=/path/to/last30days/skill
