@@ -10,6 +10,37 @@ It uses a broad `last30days`-style research substrate for multi-source evidence,
 - source diversity and momentum scoring
 - Markdown, JSON, and self-contained HTML trend-map outputs
 
+## Install locally
+
+From this repository:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\skills\trender\scripts\install-skill.ps1 `
+  -Force
+```
+
+That installs the skill to:
+
+```text
+%USERPROFILE%\.copilot\skills\trender
+```
+
+On macOS/Linux:
+
+```bash
+bash ./skills/trender/scripts/install-skill.sh
+```
+
+To install somewhere else:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\skills\trender\scripts\install-skill.ps1 `
+  -Destination "C:\path\to\skills\trender" `
+  -Force
+```
+
 ## Run locally
 
 Install or clone `last30days-skill`, then point Trender at it:

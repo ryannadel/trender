@@ -9,6 +9,10 @@ $Stage = Join-Path ([System.IO.Path]::GetTempPath()) ("trender-skill-" + [guid]:
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
 Copy-Item (Join-Path $SkillDir "SKILL.md") $Stage -Force
 Copy-Item (Join-Path $SkillDir "scripts") $Stage -Recurse -Force
+Get-ChildItem -Path $Stage -Recurse -Directory -Filter "__pycache__" |
+    Remove-Item -Recurse -Force
+Get-ChildItem -Path $Stage -Recurse -File -Include "*.pyc", "*.pyo" |
+    Remove-Item -Force
 
 $TempArchive = Join-Path ([System.IO.Path]::GetTempPath()) ("trender.skill." + [guid]::NewGuid().ToString("N") + ".zip")
 $SkillArchive = Join-Path $Dist "trender.skill"
