@@ -1,0 +1,1177 @@
+{
+  "version": 1,
+  "project": "trender",
+  "generatedAt": "2026-05-15T17:35:43.135201+00:00",
+  "updatedAt": null,
+  "summary": {
+    "files": {
+      "total": 13,
+      "covered": 0,
+      "percentage": 0
+    },
+    "concepts": {
+      "total": 12,
+      "covered": 0,
+      "percentage": 0
+    },
+    "flows": {
+      "total": 6,
+      "covered": 0,
+      "percentage": 0
+    },
+    "overall": 0
+  },
+  "files": [
+    {
+      "path": "pyproject.toml",
+      "status": "uncovered",
+      "description": "Python package metadata, dependencies, and console script definition.",
+      "relatedConcepts": [
+        "packaging"
+      ],
+      "complexity": "config",
+      "guideSection": "architecture",
+      "updatedAt": null,
+      "difficulty": "beginner",
+      "depth": "overview"
+    },
+    {
+      "path": ".gitignore",
+      "status": "uncovered",
+      "description": "Excludes local secrets, virtual environments, bytecode, and generated scan data.",
+      "relatedConcepts": [
+        "safety-boundaries"
+      ],
+      "complexity": "config",
+      "guideSection": "configuration",
+      "updatedAt": null,
+      "difficulty": "beginner",
+      "depth": "standard"
+    },
+    {
+      "path": "trender/__init__.py",
+      "status": "uncovered",
+      "description": "Package version marker.",
+      "relatedConcepts": [
+        "packaging"
+      ],
+      "complexity": "supporting",
+      "guideSection": "architecture",
+      "updatedAt": null,
+      "difficulty": "beginner",
+      "depth": "overview"
+    },
+    {
+      "path": "trender/models.py",
+      "status": "uncovered",
+      "description": "Shared dataclasses for sources, scans, extracted topics, and trend maps.",
+      "relatedConcepts": [
+        "data-model"
+      ],
+      "complexity": "core",
+      "guideSection": "data-model",
+      "updatedAt": null,
+      "difficulty": "beginner",
+      "depth": "standard"
+    },
+    {
+      "path": "trender/config.py",
+      "status": "uncovered",
+      "description": "Loads runtime settings from environment variables and .env.",
+      "relatedConcepts": [
+        "configuration",
+        "safety-boundaries"
+      ],
+      "complexity": "config",
+      "guideSection": "configuration",
+      "updatedAt": null,
+      "difficulty": "beginner",
+      "depth": "standard"
+    },
+    {
+      "path": "trender/timeframes.py",
+      "status": "uncovered",
+      "description": "Parses and validates time windows.",
+      "relatedConcepts": [
+        "time-windows"
+      ],
+      "complexity": "supporting",
+      "guideSection": "configuration",
+      "updatedAt": null,
+      "difficulty": "beginner",
+      "depth": "standard"
+    },
+    {
+      "path": "trender/cli.py",
+      "status": "uncovered",
+      "description": "Click command entry point and scan orchestration.",
+      "relatedConcepts": [
+        "scan-orchestration"
+      ],
+      "complexity": "core",
+      "guideSection": "decision-flow",
+      "updatedAt": null,
+      "difficulty": "beginner",
+      "depth": "standard"
+    },
+    {
+      "path": "trender/discoverer.py",
+      "status": "uncovered",
+      "description": "Discovers candidate sources from arXiv, GitHub, and OpenAI web search.",
+      "relatedConcepts": [
+        "source-discovery"
+      ],
+      "complexity": "core",
+      "guideSection": "discovery",
+      "updatedAt": null,
+      "difficulty": "intermediate",
+      "depth": "standard"
+    },
+    {
+      "path": "trender/crawler.py",
+      "status": "uncovered",
+      "description": "Enriches source summaries with cached page text or GitHub README content.",
+      "relatedConcepts": [
+        "content-enrichment"
+      ],
+      "complexity": "core",
+      "guideSection": "crawling",
+      "updatedAt": null,
+      "difficulty": "intermediate",
+      "depth": "standard"
+    },
+    {
+      "path": "trender/analyzer.py",
+      "status": "uncovered",
+      "description": "Uses GPT to extract structured trend topics and evidence.",
+      "relatedConcepts": [
+        "llm-analysis",
+        "safety-boundaries"
+      ],
+      "complexity": "core",
+      "guideSection": "analysis",
+      "updatedAt": null,
+      "difficulty": "intermediate",
+      "depth": "deep-dive"
+    },
+    {
+      "path": "trender/trends.py",
+      "status": "uncovered",
+      "description": "Builds trend maps through grouping, bucketing, momentum, direction, and ranking.",
+      "relatedConcepts": [
+        "trend-computation"
+      ],
+      "complexity": "core",
+      "guideSection": "trend-engine",
+      "updatedAt": null,
+      "difficulty": "advanced",
+      "depth": "deep-dive"
+    },
+    {
+      "path": "trender/storage.py",
+      "status": "uncovered",
+      "description": "Persists scan JSON and report HTML under topic slugs.",
+      "relatedConcepts": [
+        "local-persistence"
+      ],
+      "complexity": "supporting",
+      "guideSection": "storage",
+      "updatedAt": null,
+      "difficulty": "beginner",
+      "depth": "standard"
+    },
+    {
+      "path": "trender/renderer.py",
+      "status": "uncovered",
+      "description": "Renders self-contained interactive trend reports with embedded JSON.",
+      "relatedConcepts": [
+        "static-rendering"
+      ],
+      "complexity": "core",
+      "guideSection": "rendering",
+      "updatedAt": null,
+      "difficulty": "intermediate",
+      "depth": "standard"
+    }
+  ],
+  "concepts": [
+    {
+      "id": "packaging",
+      "name": "Packaging & CLI Entry",
+      "description": "How pyproject exposes the trender command and declares runtime dependencies.",
+      "status": "uncovered",
+      "files": [
+        "pyproject.toml",
+        "trender/__init__.py"
+      ],
+      "quizIds": [
+        "q1"
+      ],
+      "guideSection": "architecture",
+      "updatedAt": null,
+      "difficulty": "beginner",
+      "depth": "overview"
+    },
+    {
+      "id": "data-model",
+      "name": "Shared Data Model",
+      "description": "The dataclass vocabulary that lets modules pass evidence and trends safely.",
+      "status": "uncovered",
+      "files": [
+        "trender/models.py"
+      ],
+      "quizIds": [
+        "q2"
+      ],
+      "guideSection": "data-model",
+      "updatedAt": null,
+      "difficulty": "beginner",
+      "depth": "standard"
+    },
+    {
+      "id": "scan-orchestration",
+      "name": "Scan Orchestration",
+      "description": "The CLI sequence that conducts discovery, crawling, analysis, trend building, and rendering.",
+      "status": "uncovered",
+      "files": [
+        "trender/cli.py"
+      ],
+      "quizIds": [
+        "q1",
+        "q7"
+      ],
+      "guideSection": "decision-flow",
+      "updatedAt": null,
+      "difficulty": "beginner",
+      "depth": "standard"
+    },
+    {
+      "id": "source-discovery",
+      "name": "Source Discovery",
+      "description": "The multi-source fan-in from arXiv, GitHub, and web search.",
+      "status": "uncovered",
+      "files": [
+        "trender/discoverer.py"
+      ],
+      "quizIds": [
+        "q3"
+      ],
+      "guideSection": "discovery",
+      "updatedAt": null,
+      "difficulty": "intermediate",
+      "depth": "standard"
+    },
+    {
+      "id": "content-enrichment",
+      "name": "Content Enrichment",
+      "description": "How summaries become richer text through cached fetches and README lookup.",
+      "status": "uncovered",
+      "files": [
+        "trender/crawler.py"
+      ],
+      "quizIds": [
+        "q4"
+      ],
+      "guideSection": "crawling",
+      "updatedAt": null,
+      "difficulty": "intermediate",
+      "depth": "standard"
+    },
+    {
+      "id": "llm-analysis",
+      "name": "LLM Analysis",
+      "description": "GPT-backed extraction of named topics, evidence, novelty, and relevance.",
+      "status": "uncovered",
+      "files": [
+        "trender/analyzer.py"
+      ],
+      "quizIds": [
+        "q5"
+      ],
+      "guideSection": "analysis",
+      "updatedAt": null,
+      "difficulty": "intermediate",
+      "depth": "deep-dive"
+    },
+    {
+      "id": "trend-computation",
+      "name": "Trend Computation",
+      "description": "Grouping, bucketing, momentum, direction classification, and ranking.",
+      "status": "uncovered",
+      "files": [
+        "trender/trends.py"
+      ],
+      "quizIds": [
+        "q6",
+        "q11"
+      ],
+      "guideSection": "trend-engine",
+      "updatedAt": null,
+      "difficulty": "advanced",
+      "depth": "deep-dive"
+    },
+    {
+      "id": "static-rendering",
+      "name": "Static Report Rendering",
+      "description": "Embedding TrendMap JSON into a self-contained browser report.",
+      "status": "uncovered",
+      "files": [
+        "trender/renderer.py"
+      ],
+      "quizIds": [
+        "q8"
+      ],
+      "guideSection": "rendering",
+      "updatedAt": null,
+      "difficulty": "intermediate",
+      "depth": "standard"
+    },
+    {
+      "id": "local-persistence",
+      "name": "Local Persistence",
+      "description": "Timestamped scan JSON and latest HTML reports stored by topic slug.",
+      "status": "uncovered",
+      "files": [
+        "trender/storage.py"
+      ],
+      "quizIds": [
+        "q7",
+        "q12"
+      ],
+      "guideSection": "storage",
+      "updatedAt": null,
+      "difficulty": "beginner",
+      "depth": "standard"
+    },
+    {
+      "id": "configuration",
+      "name": "Configuration Surface",
+      "description": "Runtime knobs for data dir, models, tokens, timeout, and API keys.",
+      "status": "uncovered",
+      "files": [
+        "trender/config.py"
+      ],
+      "quizIds": [
+        "q9"
+      ],
+      "guideSection": "configuration",
+      "updatedAt": null,
+      "difficulty": "beginner",
+      "depth": "standard"
+    },
+    {
+      "id": "time-windows",
+      "name": "Time Windows",
+      "description": "Rules for days-based versus explicit date range scanning.",
+      "status": "uncovered",
+      "files": [
+        "trender/timeframes.py"
+      ],
+      "quizIds": [
+        "q10"
+      ],
+      "guideSection": "configuration",
+      "updatedAt": null,
+      "difficulty": "beginner",
+      "depth": "standard"
+    },
+    {
+      "id": "safety-boundaries",
+      "name": "Safety Boundaries",
+      "description": "No heuristic fallback, ignored secrets, and date validation guardrails.",
+      "status": "uncovered",
+      "files": [
+        ".gitignore",
+        "trender/config.py",
+        "trender/analyzer.py",
+        "trender/timeframes.py"
+      ],
+      "quizIds": [
+        "q5",
+        "q10"
+      ],
+      "guideSection": "configuration",
+      "updatedAt": null,
+      "difficulty": "beginner",
+      "depth": "standard"
+    }
+  ],
+  "flows": [
+    {
+      "id": "full-scan",
+      "name": "Full Scan Pipeline",
+      "description": "End-to-end execution from CLI command to saved HTML report.",
+      "status": "uncovered",
+      "steps": [
+        {
+          "description": "Load configuration and storage.",
+          "file": "trender/cli.py"
+        },
+        {
+          "description": "Build time window.",
+          "file": "trender/timeframes.py"
+        },
+        {
+          "description": "Discover candidate sources.",
+          "file": "trender/discoverer.py"
+        },
+        {
+          "description": "Enrich source content.",
+          "file": "trender/crawler.py"
+        },
+        {
+          "description": "Extract topics with GPT.",
+          "file": "trender/analyzer.py"
+        },
+        {
+          "description": "Persist scan and report.",
+          "file": "trender/storage.py"
+        },
+        {
+          "description": "Render HTML.",
+          "file": "trender/renderer.py"
+        }
+      ],
+      "quizIds": [
+        "q1",
+        "q7"
+      ],
+      "guideSection": "decision-flow",
+      "updatedAt": null,
+      "difficulty": "beginner",
+      "depth": "standard"
+    },
+    {
+      "id": "discovery-fan-in",
+      "name": "Discovery Fan-in",
+      "description": "Combines arXiv, GitHub, and web search into deduplicated Source records.",
+      "status": "uncovered",
+      "steps": [
+        {
+          "description": "Create source-specific query.",
+          "file": "trender/discoverer.py"
+        },
+        {
+          "description": "Build Source objects.",
+          "file": "trender/discoverer.py"
+        },
+        {
+          "description": "Deduplicate by URL.",
+          "file": "trender/discoverer.py"
+        }
+      ],
+      "quizIds": [
+        "q3"
+      ],
+      "guideSection": "discovery",
+      "updatedAt": null,
+      "difficulty": "intermediate",
+      "depth": "standard"
+    },
+    {
+      "id": "content-enrichment",
+      "name": "Content Enrichment Flow",
+      "description": "Turns shallow source metadata into fuller text for analysis.",
+      "status": "uncovered",
+      "steps": [
+        {
+          "description": "Skip arXiv because summary is already content.",
+          "file": "trender/crawler.py"
+        },
+        {
+          "description": "Fetch GitHub README when source is GitHub.",
+          "file": "trender/crawler.py"
+        },
+        {
+          "description": "Fetch and cache HTML for web sources.",
+          "file": "trender/crawler.py"
+        },
+        {
+          "description": "Convert HTML to plain text.",
+          "file": "trender/crawler.py"
+        }
+      ],
+      "quizIds": [
+        "q4"
+      ],
+      "guideSection": "crawling",
+      "updatedAt": null,
+      "difficulty": "intermediate",
+      "depth": "standard"
+    },
+    {
+      "id": "topic-extraction",
+      "name": "Topic Extraction Flow",
+      "description": "Packages source text into a GPT prompt and converts JSON back to dataclasses.",
+      "status": "uncovered",
+      "steps": [
+        {
+          "description": "Validate API key.",
+          "file": "trender/analyzer.py"
+        },
+        {
+          "description": "Build source blob.",
+          "file": "trender/analyzer.py"
+        },
+        {
+          "description": "Request JSON object response.",
+          "file": "trender/analyzer.py"
+        },
+        {
+          "description": "Normalize topic payload.",
+          "file": "trender/analyzer.py"
+        }
+      ],
+      "quizIds": [
+        "q5"
+      ],
+      "guideSection": "analysis",
+      "updatedAt": null,
+      "difficulty": "intermediate",
+      "depth": "deep-dive"
+    },
+    {
+      "id": "trend-ranking",
+      "name": "Trend Ranking Flow",
+      "description": "Converts historical scan evidence into ranked TrendTopic records.",
+      "status": "uncovered",
+      "steps": [
+        {
+          "description": "Load historical scans.",
+          "file": "trender/storage.py"
+        },
+        {
+          "description": "Filter sources into window.",
+          "file": "trender/trends.py"
+        },
+        {
+          "description": "Group extracted topics.",
+          "file": "trender/trends.py"
+        },
+        {
+          "description": "Count source IDs by bucket.",
+          "file": "trender/trends.py"
+        },
+        {
+          "description": "Compute velocity and direction.",
+          "file": "trender/trends.py"
+        },
+        {
+          "description": "Sort by rank tuple.",
+          "file": "trender/trends.py"
+        }
+      ],
+      "quizIds": [
+        "q6",
+        "q11"
+      ],
+      "guideSection": "trend-engine",
+      "updatedAt": null,
+      "difficulty": "advanced",
+      "depth": "deep-dive"
+    },
+    {
+      "id": "report-exploration",
+      "name": "Report Exploration Flow",
+      "description": "Uses latest.html to open the newest static report for a topic.",
+      "status": "uncovered",
+      "steps": [
+        {
+          "description": "Save timestamped report.",
+          "file": "trender/storage.py"
+        },
+        {
+          "description": "Copy report to latest.html.",
+          "file": "trender/storage.py"
+        },
+        {
+          "description": "Open latest report in browser.",
+          "file": "trender/cli.py"
+        }
+      ],
+      "quizIds": [
+        "q8",
+        "q12"
+      ],
+      "guideSection": "rendering",
+      "updatedAt": null,
+      "difficulty": "intermediate",
+      "depth": "standard"
+    }
+  ],
+  "quizMapping": {
+    "q1": {
+      "concepts": [
+        "scan-orchestration",
+        "packaging"
+      ],
+      "flows": [
+        "full-scan"
+      ],
+      "files": [
+        "trender/cli.py",
+        "pyproject.toml"
+      ],
+      "difficulty": "beginner",
+      "depth": "overview",
+      "questionType": "structure",
+      "prerequisites": []
+    },
+    "q2": {
+      "concepts": [
+        "data-model"
+      ],
+      "flows": [
+        "full-scan"
+      ],
+      "files": [
+        "trender/models.py"
+      ],
+      "difficulty": "beginner",
+      "depth": "standard",
+      "questionType": "structure",
+      "prerequisites": []
+    },
+    "q3": {
+      "concepts": [
+        "source-discovery"
+      ],
+      "flows": [
+        "discovery-fan-in"
+      ],
+      "files": [
+        "trender/discoverer.py"
+      ],
+      "difficulty": "intermediate",
+      "depth": "standard",
+      "questionType": "behavior",
+      "prerequisites": []
+    },
+    "q4": {
+      "concepts": [
+        "content-enrichment"
+      ],
+      "flows": [
+        "content-enrichment"
+      ],
+      "files": [
+        "trender/crawler.py"
+      ],
+      "difficulty": "intermediate",
+      "depth": "standard",
+      "questionType": "behavior",
+      "prerequisites": []
+    },
+    "q5": {
+      "concepts": [
+        "llm-analysis",
+        "safety-boundaries"
+      ],
+      "flows": [
+        "topic-extraction"
+      ],
+      "files": [
+        "trender/analyzer.py"
+      ],
+      "difficulty": "intermediate",
+      "depth": "deep-dive",
+      "questionType": "boundary",
+      "prerequisites": []
+    },
+    "q6": {
+      "concepts": [
+        "trend-computation"
+      ],
+      "flows": [
+        "trend-ranking"
+      ],
+      "files": [
+        "trender/trends.py"
+      ],
+      "difficulty": "advanced",
+      "depth": "deep-dive",
+      "questionType": "logic",
+      "prerequisites": []
+    },
+    "q7": {
+      "concepts": [
+        "scan-orchestration",
+        "local-persistence"
+      ],
+      "flows": [
+        "full-scan",
+        "trend-ranking"
+      ],
+      "files": [
+        "trender/cli.py",
+        "trender/storage.py"
+      ],
+      "difficulty": "beginner",
+      "depth": "standard",
+      "questionType": "system-thinking",
+      "prerequisites": []
+    },
+    "q8": {
+      "concepts": [
+        "static-rendering"
+      ],
+      "flows": [
+        "report-exploration"
+      ],
+      "files": [
+        "trender/renderer.py"
+      ],
+      "difficulty": "intermediate",
+      "depth": "standard",
+      "questionType": "structure",
+      "prerequisites": []
+    },
+    "q9": {
+      "concepts": [
+        "configuration"
+      ],
+      "flows": [
+        "full-scan"
+      ],
+      "files": [
+        "trender/config.py",
+        "trender/cli.py"
+      ],
+      "difficulty": "beginner",
+      "depth": "standard",
+      "questionType": "boundary",
+      "prerequisites": []
+    },
+    "q10": {
+      "concepts": [
+        "time-windows",
+        "safety-boundaries"
+      ],
+      "flows": [
+        "full-scan"
+      ],
+      "files": [
+        "trender/timeframes.py"
+      ],
+      "difficulty": "beginner",
+      "depth": "standard",
+      "questionType": "boundary",
+      "prerequisites": []
+    },
+    "q11": {
+      "concepts": [
+        "trend-computation"
+      ],
+      "flows": [
+        "trend-ranking"
+      ],
+      "files": [
+        "trender/trends.py"
+      ],
+      "difficulty": "advanced",
+      "depth": "deep-dive",
+      "questionType": "system-thinking",
+      "prerequisites": []
+    },
+    "q12": {
+      "concepts": [
+        "local-persistence"
+      ],
+      "flows": [
+        "report-exploration"
+      ],
+      "files": [
+        "trender/storage.py",
+        "trender/cli.py"
+      ],
+      "difficulty": "beginner",
+      "depth": "standard",
+      "questionType": "application",
+      "prerequisites": []
+    }
+  },
+  "domain": "codebase",
+  "labels": {
+    "files": "Source Files",
+    "concepts": "Concepts & Patterns",
+    "flows": "Data Flows"
+  },
+  "statusLabels": {
+    "files": [
+      "uncovered",
+      "read",
+      "understood"
+    ],
+    "concepts": [
+      "uncovered",
+      "taught",
+      "quiz-verified"
+    ],
+    "flows": [
+      "uncovered",
+      "traced",
+      "verified"
+    ],
+    "areas": [
+      "unmapped",
+      "mapped",
+      "understood"
+    ],
+    "modules": [
+      "planned",
+      "generated",
+      "verified"
+    ]
+  },
+  "largeCorpus": {
+    "enabled": false,
+    "reason": null,
+    "runMode": "refresh",
+    "sourceCount": 13,
+    "estimatedTokens": 18000,
+    "generatedModules": [
+      "scan-pipeline-overview"
+    ],
+    "pendingModules": []
+  },
+  "learningLevels": {
+    "difficulty": [
+      {
+        "id": "beginner",
+        "label": "Beginner",
+        "description": "Defines vocabulary and purpose with minimal assumed context"
+      },
+      {
+        "id": "intermediate",
+        "label": "Intermediate",
+        "description": "Explains mechanics for readers who know the main nouns"
+      },
+      {
+        "id": "advanced",
+        "label": "Advanced",
+        "description": "Covers edge cases, tradeoffs, and extension points"
+      }
+    ],
+    "depth": [
+      {
+        "id": "overview",
+        "label": "Overview",
+        "description": "Shortest path to orientation and safe navigation"
+      },
+      {
+        "id": "standard",
+        "label": "Standard",
+        "description": "Enough detail to reason about normal work"
+      },
+      {
+        "id": "deep-dive",
+        "label": "Deep-dive",
+        "description": "Implementation details and second-order effects"
+      }
+    ],
+    "defaultDifficulty": "beginner",
+    "defaultDepth": "standard"
+  },
+  "areas": [
+    {
+      "id": "cli-entrypoints",
+      "name": "CLI Entry Points",
+      "description": "Click commands, user-facing scan/explore/history/compare workflows, and orchestration.",
+      "status": "unmapped",
+      "difficulty": "beginner",
+      "depth": "standard",
+      "priority": "critical",
+      "rationale": "This is where users enter the system and where every core service is wired together.",
+      "guideSection": "decision-flow",
+      "moduleIds": [
+        "scan-pipeline-overview"
+      ],
+      "dependsOn": [],
+      "updatedAt": null
+    },
+    {
+      "id": "source-intake",
+      "name": "Source Intake",
+      "description": "Discovery and crawling logic that turns external APIs and pages into Source records.",
+      "status": "unmapped",
+      "difficulty": "intermediate",
+      "depth": "standard",
+      "priority": "high",
+      "rationale": "Trend quality depends on the evidence pool created here.",
+      "guideSection": "discovery",
+      "moduleIds": [
+        "source-intake-module"
+      ],
+      "dependsOn": [
+        "cli-entrypoints"
+      ],
+      "updatedAt": null
+    },
+    {
+      "id": "analysis-and-ranking",
+      "name": "Analysis & Ranking",
+      "description": "GPT extraction plus the local algorithm that turns evidence into ranked trend topics.",
+      "status": "unmapped",
+      "difficulty": "advanced",
+      "depth": "deep-dive",
+      "priority": "critical",
+      "rationale": "This area contains the most important decision-making and failure modes.",
+      "guideSection": "trend-engine",
+      "moduleIds": [
+        "analysis-ranking-module"
+      ],
+      "dependsOn": [
+        "source-intake"
+      ],
+      "updatedAt": null
+    },
+    {
+      "id": "persistence-and-rendering",
+      "name": "Persistence & Rendering",
+      "description": "Local JSON scan history and static HTML report generation.",
+      "status": "unmapped",
+      "difficulty": "beginner",
+      "depth": "standard",
+      "priority": "high",
+      "rationale": "This explains why the tool is local-first and how reports are opened later.",
+      "guideSection": "storage",
+      "moduleIds": [
+        "persistence-rendering-module"
+      ],
+      "dependsOn": [
+        "analysis-and-ranking"
+      ],
+      "updatedAt": null
+    }
+  ],
+  "modules": [
+    {
+      "id": "scan-pipeline-overview",
+      "areaId": "cli-entrypoints",
+      "name": "Scan Pipeline Overview",
+      "description": "A focused map from `trender scan` to a generated report.",
+      "status": "generated",
+      "difficulty": "beginner",
+      "depth": "standard",
+      "priority": "critical",
+      "guideFile": "learning-guide.html",
+      "guideSection": "decision-flow",
+      "filePaths": [
+        "trender/cli.py",
+        "trender/timeframes.py"
+      ],
+      "conceptIds": [
+        "scan-orchestration",
+        "time-windows"
+      ],
+      "flowIds": [
+        "full-scan"
+      ],
+      "dependsOn": [],
+      "updatedAt": null
+    },
+    {
+      "id": "source-intake-module",
+      "areaId": "source-intake",
+      "name": "Source Intake",
+      "description": "Discovery, deduplication, crawling, caching, and enrichment.",
+      "status": "generated",
+      "difficulty": "intermediate",
+      "depth": "standard",
+      "priority": "high",
+      "guideFile": "learning-guide.html",
+      "guideSection": "discovery",
+      "filePaths": [
+        "trender/discoverer.py",
+        "trender/crawler.py"
+      ],
+      "conceptIds": [
+        "source-discovery",
+        "content-enrichment"
+      ],
+      "flowIds": [
+        "discovery-fan-in",
+        "content-enrichment"
+      ],
+      "dependsOn": [
+        "scan-pipeline-overview"
+      ],
+      "updatedAt": null
+    },
+    {
+      "id": "analysis-ranking-module",
+      "areaId": "analysis-and-ranking",
+      "name": "Analysis and Ranking",
+      "description": "LLM topic extraction and trend scoring mechanics.",
+      "status": "generated",
+      "difficulty": "advanced",
+      "depth": "deep-dive",
+      "priority": "critical",
+      "guideFile": "learning-guide.html",
+      "guideSection": "trend-engine",
+      "filePaths": [
+        "trender/analyzer.py",
+        "trender/trends.py"
+      ],
+      "conceptIds": [
+        "llm-analysis",
+        "trend-computation",
+        "safety-boundaries"
+      ],
+      "flowIds": [
+        "topic-extraction",
+        "trend-ranking"
+      ],
+      "dependsOn": [
+        "source-intake-module"
+      ],
+      "updatedAt": null
+    },
+    {
+      "id": "persistence-rendering-module",
+      "areaId": "persistence-and-rendering",
+      "name": "Persistence and Rendering",
+      "description": "How scan JSON becomes reusable report history and static HTML.",
+      "status": "generated",
+      "difficulty": "beginner",
+      "depth": "standard",
+      "priority": "high",
+      "guideFile": "learning-guide.html",
+      "guideSection": "storage",
+      "filePaths": [
+        "trender/storage.py",
+        "trender/renderer.py"
+      ],
+      "conceptIds": [
+        "local-persistence",
+        "static-rendering"
+      ],
+      "flowIds": [
+        "report-exploration"
+      ],
+      "dependsOn": [
+        "analysis-ranking-module"
+      ],
+      "updatedAt": null
+    }
+  ],
+  "sourceSummaries": [
+    {
+      "path": "pyproject.toml",
+      "summary": "Python package metadata, dependencies, and console script definition.",
+      "whyItMatters": "This source participates in Trender's local trend extraction pipeline.",
+      "areaId": "cli-entrypoints",
+      "moduleId": "scan-pipeline-overview",
+      "sourceHash": null,
+      "updatedAt": null
+    },
+    {
+      "path": ".gitignore",
+      "summary": "Excludes local secrets, virtual environments, bytecode, and generated scan data.",
+      "whyItMatters": "This source participates in Trender's local trend extraction pipeline.",
+      "areaId": "cli-entrypoints",
+      "moduleId": "scan-pipeline-overview",
+      "sourceHash": null,
+      "updatedAt": null
+    },
+    {
+      "path": "trender/__init__.py",
+      "summary": "Package version marker.",
+      "whyItMatters": "This source participates in Trender's local trend extraction pipeline.",
+      "areaId": "cli-entrypoints",
+      "moduleId": "scan-pipeline-overview",
+      "sourceHash": null,
+      "updatedAt": null
+    },
+    {
+      "path": "trender/models.py",
+      "summary": "Shared dataclasses for sources, scans, extracted topics, and trend maps.",
+      "whyItMatters": "This source participates in Trender's local trend extraction pipeline.",
+      "areaId": "cli-entrypoints",
+      "moduleId": "scan-pipeline-overview",
+      "sourceHash": null,
+      "updatedAt": null
+    },
+    {
+      "path": "trender/config.py",
+      "summary": "Loads runtime settings from environment variables and .env.",
+      "whyItMatters": "This source participates in Trender's local trend extraction pipeline.",
+      "areaId": "cli-entrypoints",
+      "moduleId": "scan-pipeline-overview",
+      "sourceHash": null,
+      "updatedAt": null
+    },
+    {
+      "path": "trender/timeframes.py",
+      "summary": "Parses and validates time windows.",
+      "whyItMatters": "This source participates in Trender's local trend extraction pipeline.",
+      "areaId": "cli-entrypoints",
+      "moduleId": "scan-pipeline-overview",
+      "sourceHash": null,
+      "updatedAt": null
+    },
+    {
+      "path": "trender/cli.py",
+      "summary": "Click command entry point and scan orchestration.",
+      "whyItMatters": "This source participates in Trender's local trend extraction pipeline.",
+      "areaId": "cli-entrypoints",
+      "moduleId": "scan-pipeline-overview",
+      "sourceHash": null,
+      "updatedAt": null
+    },
+    {
+      "path": "trender/discoverer.py",
+      "summary": "Discovers candidate sources from arXiv, GitHub, and OpenAI web search.",
+      "whyItMatters": "This source participates in Trender's local trend extraction pipeline.",
+      "areaId": "source-intake",
+      "moduleId": "source-intake-module",
+      "sourceHash": null,
+      "updatedAt": null
+    },
+    {
+      "path": "trender/crawler.py",
+      "summary": "Enriches source summaries with cached page text or GitHub README content.",
+      "whyItMatters": "This source participates in Trender's local trend extraction pipeline.",
+      "areaId": "cli-entrypoints",
+      "moduleId": "source-intake-module",
+      "sourceHash": null,
+      "updatedAt": null
+    },
+    {
+      "path": "trender/analyzer.py",
+      "summary": "Uses GPT to extract structured trend topics and evidence.",
+      "whyItMatters": "This source participates in Trender's local trend extraction pipeline.",
+      "areaId": "cli-entrypoints",
+      "moduleId": "analysis-ranking-module",
+      "sourceHash": null,
+      "updatedAt": null
+    },
+    {
+      "path": "trender/trends.py",
+      "summary": "Builds trend maps through grouping, bucketing, momentum, direction, and ranking.",
+      "whyItMatters": "This source participates in Trender's local trend extraction pipeline.",
+      "areaId": "analysis-and-ranking",
+      "moduleId": "analysis-ranking-module",
+      "sourceHash": null,
+      "updatedAt": null
+    },
+    {
+      "path": "trender/storage.py",
+      "summary": "Persists scan JSON and report HTML under topic slugs.",
+      "whyItMatters": "This source participates in Trender's local trend extraction pipeline.",
+      "areaId": "persistence-and-rendering",
+      "moduleId": "persistence-rendering-module",
+      "sourceHash": null,
+      "updatedAt": null
+    },
+    {
+      "path": "trender/renderer.py",
+      "summary": "Renders self-contained interactive trend reports with embedded JSON.",
+      "whyItMatters": "This source participates in Trender's local trend extraction pipeline.",
+      "areaId": "cli-entrypoints",
+      "moduleId": "persistence-rendering-module",
+      "sourceHash": null,
+      "updatedAt": null
+    }
+  ]
+}

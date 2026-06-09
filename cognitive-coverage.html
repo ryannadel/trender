@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Trender Cognitive Coverage Dashboard</title>
+<style>
+:root{--bg:#0a1628;--surface:#111d2e;--surface2:#162438;--border:rgba(100,160,220,0.15);--text:#d0dff0;--text-dim:#7a96b0;--accent:#5bb8ff;--accent2:#3dd68c;--warn:#ffb347;--danger:#ff6b6b;--code-bg:#0d1926;--green-bg:rgba(61,214,140,0.08);--amber-bg:rgba(255,179,71,0.08);--red-bg:rgba(255,107,107,0.08);--blue-bg:rgba(91,184,255,0.06)}body{margin:0;background:var(--bg);color:var(--text);font-family:Segoe UI,system-ui,sans-serif;line-height:1.55}main{max-width:1180px;margin:0 auto;padding:32px}h1{margin:0 0 8px}.hero,.panel,.card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:18px;margin:14px 0}.top{display:grid;grid-template-columns:220px 1fr;gap:18px}.bars{display:grid;gap:12px}.bar{background:var(--surface2);border-radius:999px;overflow:hidden;height:12px}.fill{height:100%;background:var(--accent2)}.tabs{display:flex;gap:8px;flex-wrap:wrap}.tabs button,.status button,.actions button{background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:9px;padding:8px 12px;cursor:pointer}.tabs button.active{background:var(--accent);color:#06101e}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}.card.uncovered{border-color:rgba(255,107,107,.45);background:var(--red-bg)}.card.read,.card.taught,.card.traced{border-color:rgba(255,179,71,.45);background:var(--amber-bg)}.card.understood,.card.quiz-verified,.card.verified{border-color:rgba(61,214,140,.45);background:var(--green-bg)}.badge{display:inline-block;border:1px solid var(--border);border-radius:999px;padding:2px 8px;color:var(--text-dim);font-size:12px}a{color:var(--accent)}.timeline{display:flex;gap:8px;overflow:auto}.step{min-width:180px;background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:10px}.hidden{display:none}input[type=file]{margin:8px 0;color:var(--text)}pre{white-space:pre-wrap;background:var(--code-bg);padding:12px;border-radius:10px}@media(max-width:760px){.top{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main>
+<section class="hero">
+  <h1>Cognitive Coverage Dashboard</h1>
+  <p>Tracks understanding coverage for Trender. Quiz results from <a href="learning-guide.html">learning-guide.html</a> sync through <code>localStorage</code>.</p>
+  <div class="actions"><button onclick="exportManifest()">Export JSON</button> <label>Import JSON <input type="file" onchange="importManifest(event)"></label></div>
+</section>
+<section class="top">
+  <div class="panel"><canvas id="donut" width="180" height="180"></canvas></div>
+  <div class="panel"><h2>Coverage Axes</h2><div id="summaryBars" class="bars"></div></div>
+</section>
+<section class="panel">
+  <div class="tabs">
+    <button class="active" onclick="showTab('files',this)">Files</button>
+    <button onclick="showTab('concepts',this)">Concepts</button>
+    <button onclick="showTab('flows',this)">Flows</button>
+    <button onclick="showTab('gaps',this)">Gap Report</button>
+  </div>
+</section>
+<section id="files" class="tab"></section>
+<section id="concepts" class="tab hidden"></section>
+<section id="flows" class="tab hidden"></section>
+<section id="gaps" class="tab hidden"></section>
+<script id="manifest-data" type="application/json">
+{
+  "version": 1,
+  "project": "trender",
+  "generatedAt": "2026-05-09T15:27:42.782-07:00",
+  "updatedAt": null,
+  "summary": {
+    "files": { "total": 13, "covered": 0, "percentage": 0 },
+    "concepts": { "total": 12, "covered": 0, "percentage": 0 },
+    "flows": { "total": 6, "covered": 0, "percentage": 0 },
+    "overall": 0
+  },
+  "files": [
+    { "path": "pyproject.toml", "status": "uncovered", "description": "Python package metadata, dependencies, and console script definition.", "relatedConcepts": ["packaging"], "complexity": "config", "guideSection": "architecture", "updatedAt": null },
+    { "path": ".gitignore", "status": "uncovered", "description": "Excludes local secrets, virtual environments, bytecode, and generated scan data.", "relatedConcepts": ["safety-boundaries"], "complexity": "config", "guideSection": "configuration", "updatedAt": null },
+    { "path": "trender/__init__.py", "status": "uncovered", "description": "Package version marker.", "relatedConcepts": ["packaging"], "complexity": "supporting", "guideSection": "architecture", "updatedAt": null },
+    { "path": "trender/models.py", "status": "uncovered", "description": "Shared dataclasses for sources, scans, extracted topics, and trend maps.", "relatedConcepts": ["data-model"], "complexity": "core", "guideSection": "data-model", "updatedAt": null },
+    { "path": "trender/config.py", "status": "uncovered", "description": "Loads runtime settings from environment variables and .env.", "relatedConcepts": ["configuration", "safety-boundaries"], "complexity": "config", "guideSection": "configuration", "updatedAt": null },
+    { "path": "trender/timeframes.py", "status": "uncovered", "description": "Parses and validates time windows.", "relatedConcepts": ["time-windows"], "complexity": "supporting", "guideSection": "configuration", "updatedAt": null },
+    { "path": "trender/cli.py", "status": "uncovered", "description": "Click command entry point and scan orchestration.", "relatedConcepts": ["scan-orchestration"], "complexity": "core", "guideSection": "decision-flow", "updatedAt": null },
+    { "path": "trender/discoverer.py", "status": "uncovered", "description": "Discovers candidate sources from arXiv, GitHub, and OpenAI web search.", "relatedConcepts": ["source-discovery"], "complexity": "core", "guideSection": "discovery", "updatedAt": null },
+    { "path": "trender/crawler.py", "status": "uncovered", "description": "Enriches source summaries with cached page text or GitHub README content.", "relatedConcepts": ["content-enrichment"], "complexity": "core", "guideSection": "crawling", "updatedAt": null },
+    { "path": "trender/analyzer.py", "status": "uncovered", "description": "Uses GPT to extract structured trend topics and evidence.", "relatedConcepts": ["llm-analysis", "safety-boundaries"], "complexity": "core", "guideSection": "analysis", "updatedAt": null },
+    { "path": "trender/trends.py", "status": "uncovered", "description": "Builds trend maps through grouping, bucketing, momentum, direction, and ranking.", "relatedConcepts": ["trend-computation"], "complexity": "core", "guideSection": "trend-engine", "updatedAt": null },
+    { "path": "trender/storage.py", "status": "uncovered", "description": "Persists scan JSON and report HTML under topic slugs.", "relatedConcepts": ["local-persistence"], "complexity": "supporting", "guideSection": "storage", "updatedAt": null },
+    { "path": "trender/renderer.py", "status": "uncovered", "description": "Renders self-contained interactive trend reports with embedded JSON.", "relatedConcepts": ["static-rendering"], "complexity": "core", "guideSection": "rendering", "updatedAt": null }
+  ],
+  "concepts": [
+    { "id": "packaging", "name": "Packaging & CLI Entry", "description": "How pyproject exposes the trender command and declares runtime dependencies.", "status": "uncovered", "files": ["pyproject.toml", "trender/__init__.py"], "quizIds": ["q1"], "guideSection": "architecture", "updatedAt": null },
+    { "id": "data-model", "name": "Shared Data Model", "description": "The dataclass vocabulary that lets modules pass evidence and trends safely.", "status": "uncovered", "files": ["trender/models.py"], "quizIds": ["q2"], "guideSection": "data-model", "updatedAt": null },
+    { "id": "scan-orchestration", "name": "Scan Orchestration", "description": "The CLI sequence that conducts discovery, crawling, analysis, trend building, and rendering.", "status": "uncovered", "files": ["trender/cli.py"], "quizIds": ["q1", "q7"], "guideSection": "decision-flow", "updatedAt": null },
+    { "id": "source-discovery", "name": "Source Discovery", "description": "The multi-source fan-in from arXiv, GitHub, and web search.", "status": "uncovered", "files": ["trender/discoverer.py"], "quizIds": ["q3"], "guideSection": "discovery", "updatedAt": null },
+    { "id": "content-enrichment", "name": "Content Enrichment", "description": "How summaries become richer text through cached fetches and README lookup.", "status": "uncovered", "files": ["trender/crawler.py"], "quizIds": ["q4"], "guideSection": "crawling", "updatedAt": null },
+    { "id": "llm-analysis", "name": "LLM Analysis", "description": "GPT-backed extraction of named topics, evidence, novelty, and relevance.", "status": "uncovered", "files": ["trender/analyzer.py"], "quizIds": ["q5"], "guideSection": "analysis", "updatedAt": null },
+    { "id": "trend-computation", "name": "Trend Computation", "description": "Grouping, bucketing, momentum, direction classification, and ranking.", "status": "uncovered", "files": ["trender/trends.py"], "quizIds": ["q6", "q11"], "guideSection": "trend-engine", "updatedAt": null },
+    { "id": "static-rendering", "name": "Static Report Rendering", "description": "Embedding TrendMap JSON into a self-contained browser report.", "status": "uncovered", "files": ["trender/renderer.py"], "quizIds": ["q8"], "guideSection": "rendering", "updatedAt": null },
+    { "id": "local-persistence", "name": "Local Persistence", "description": "Timestamped scan JSON and latest HTML reports stored by topic slug.", "status": "uncovered", "files": ["trender/storage.py"], "quizIds": ["q7", "q12"], "guideSection": "storage", "updatedAt": null },
+    { "id": "configuration", "name": "Configuration Surface", "description": "Runtime knobs for data dir, models, tokens, timeout, and API keys.", "status": "uncovered", "files": ["trender/config.py"], "quizIds": ["q9"], "guideSection": "configuration", "updatedAt": null },
+    { "id": "time-windows", "name": "Time Windows", "description": "Rules for days-based versus explicit date range scanning.", "status": "uncovered", "files": ["trender/timeframes.py"], "quizIds": ["q10"], "guideSection": "configuration", "updatedAt": null },
+    { "id": "safety-boundaries", "name": "Safety Boundaries", "description": "No heuristic fallback, ignored secrets, and date validation guardrails.", "status": "uncovered", "files": [".gitignore", "trender/config.py", "trender/analyzer.py", "trender/timeframes.py"], "quizIds": ["q5", "q10"], "guideSection": "configuration", "updatedAt": null }
+  ],
+  "flows": [
+    { "id": "full-scan", "name": "Full Scan Pipeline", "description": "End-to-end execution from CLI command to saved HTML report.", "status": "uncovered", "steps": [{"description":"Load configuration and storage.","file":"trender/cli.py"},{"description":"Build time window.","file":"trender/timeframes.py"},{"description":"Discover candidate sources.","file":"trender/discoverer.py"},{"description":"Enrich source content.","file":"trender/crawler.py"},{"description":"Extract topics with GPT.","file":"trender/analyzer.py"},{"description":"Persist scan and report.","file":"trender/storage.py"},{"description":"Render HTML.","file":"trender/renderer.py"}], "quizIds": ["q1", "q7"], "guideSection": "decision-flow", "updatedAt": null },
+    { "id": "discovery-fan-in", "name": "Discovery Fan-in", "description": "Combines arXiv, GitHub, and web search into deduplicated Source records.", "status": "uncovered", "steps": [{"description":"Create source-specific query.","file":"trender/discoverer.py"},{"description":"Build Source objects.","file":"trender/discoverer.py"},{"description":"Deduplicate by URL.","file":"trender/discoverer.py"}], "quizIds": ["q3"], "guideSection": "discovery", "updatedAt": null },
+    { "id": "content-enrichment", "name": "Content Enrichment Flow", "description": "Turns shallow source metadata into fuller text for analysis.", "status": "uncovered", "steps": [{"description":"Skip arXiv because summary is already content.","file":"trender/crawler.py"},{"description":"Fetch GitHub README when source is GitHub.","file":"trender/crawler.py"},{"description":"Fetch and cache HTML for web sources.","file":"trender/crawler.py"},{"description":"Convert HTML to plain text.","file":"trender/crawler.py"}], "quizIds": ["q4"], "guideSection": "crawling", "updatedAt": null },
+    { "id": "topic-extraction", "name": "Topic Extraction Flow", "description": "Packages source text into a GPT prompt and converts JSON back to dataclasses.", "status": "uncovered", "steps": [{"description":"Validate API key.","file":"trender/analyzer.py"},{"description":"Build source blob.","file":"trender/analyzer.py"},{"description":"Request JSON object response.","file":"trender/analyzer.py"},{"description":"Normalize topic payload.","file":"trender/analyzer.py"}], "quizIds": ["q5"], "guideSection": "analysis", "updatedAt": null },
+    { "id": "trend-ranking", "name": "Trend Ranking Flow", "description": "Converts historical scan evidence into ranked TrendTopic records.", "status": "uncovered", "steps": [{"description":"Load historical scans.","file":"trender/storage.py"},{"description":"Filter sources into window.","file":"trender/trends.py"},{"description":"Group extracted topics.","file":"trender/trends.py"},{"description":"Count source IDs by bucket.","file":"trender/trends.py"},{"description":"Compute velocity and direction.","file":"trender/trends.py"},{"description":"Sort by rank tuple.","file":"trender/trends.py"}], "quizIds": ["q6", "q11"], "guideSection": "trend-engine", "updatedAt": null },
+    { "id": "report-exploration", "name": "Report Exploration Flow", "description": "Uses latest.html to open the newest static report for a topic.", "status": "uncovered", "steps": [{"description":"Save timestamped report.","file":"trender/storage.py"},{"description":"Copy report to latest.html.","file":"trender/storage.py"},{"description":"Open latest report in browser.","file":"trender/cli.py"}], "quizIds": ["q8", "q12"], "guideSection": "rendering", "updatedAt": null }
+  ],
+  "quizMapping": {
+    "q1": { "concepts": ["scan-orchestration", "packaging"], "flows": ["full-scan"], "files": ["trender/cli.py", "pyproject.toml"] },
+    "q2": { "concepts": ["data-model"], "flows": ["full-scan"], "files": ["trender/models.py"] },
+    "q3": { "concepts": ["source-discovery"], "flows": ["discovery-fan-in"], "files": ["trender/discoverer.py"] },
+    "q4": { "concepts": ["content-enrichment"], "flows": ["content-enrichment"], "files": ["trender/crawler.py"] },
+    "q5": { "concepts": ["llm-analysis", "safety-boundaries"], "flows": ["topic-extraction"], "files": ["trender/analyzer.py"] },
+    "q6": { "concepts": ["trend-computation"], "flows": ["trend-ranking"], "files": ["trender/trends.py"] },
+    "q7": { "concepts": ["scan-orchestration", "local-persistence"], "flows": ["full-scan", "trend-ranking"], "files": ["trender/cli.py", "trender/storage.py"] },
+    "q8": { "concepts": ["static-rendering"], "flows": ["report-exploration"], "files": ["trender/renderer.py"] },
+    "q9": { "concepts": ["configuration"], "flows": ["full-scan"], "files": ["trender/config.py", "trender/cli.py"] },
+    "q10": { "concepts": ["time-windows", "safety-boundaries"], "flows": ["full-scan"], "files": ["trender/timeframes.py"] },
+    "q11": { "concepts": ["trend-computation"], "flows": ["trend-ranking"], "files": ["trender/trends.py"] },
+    "q12": { "concepts": ["local-persistence"], "flows": ["report-exploration"], "files": ["trender/storage.py", "trender/cli.py"] }
+  }
+}
+</script>
+<script>
+var LS_KEY='cognitive-coverage-state';
+var manifest=JSON.parse(document.getElementById('manifest-data').textContent);
+function getState(){try{return JSON.parse(localStorage.getItem(LS_KEY))||{}}catch(e){return{}}}
+function setState(s){localStorage.setItem(LS_KEY,JSON.stringify(s))}
+function applyQuizSync(){var s=getState(),qr=s.quizResults||{};manifest.concepts.forEach(function(c){if(c.quizIds&&c.quizIds.length&&c.quizIds.every(function(q){return qr[q]&&qr[q].correct}))c.status='quiz-verified'});manifest.flows.forEach(function(f){if(f.quizIds&&f.quizIds.length&&f.quizIds.every(function(q){return qr[q]&&qr[q].correct}))f.status='verified'})}
+function pct(done,total){return total?Math.round(done/total*100):0}
+function recompute(){var fc=manifest.files.filter(function(x){return x.status==='understood'}).length,cc=manifest.concepts.filter(function(x){return x.status==='quiz-verified'}).length,flc=manifest.flows.filter(function(x){return x.status==='verified'}).length;manifest.summary.files={total:manifest.files.length,covered:fc,percentage:pct(fc,manifest.files.length)};manifest.summary.concepts={total:manifest.concepts.length,covered:cc,percentage:pct(cc,manifest.concepts.length)};manifest.summary.flows={total:manifest.flows.length,covered:flc,percentage:pct(flc,manifest.flows.length)};manifest.summary.overall=Math.round((manifest.summary.files.percentage+manifest.summary.concepts.percentage+manifest.summary.flows.percentage)/3)}
+function drawDonut(){var c=document.getElementById('donut'),ctx=c.getContext('2d'),p=manifest.summary.overall;ctx.clearRect(0,0,180,180);ctx.lineWidth=22;ctx.strokeStyle='#162438';ctx.beginPath();ctx.arc(90,90,60,0,Math.PI*2);ctx.stroke();ctx.strokeStyle=p>66?'#3dd68c':p>33?'#ffb347':'#ff6b6b';ctx.beginPath();ctx.arc(90,90,60,-Math.PI/2,-Math.PI/2+Math.PI*2*p/100);ctx.stroke();ctx.fillStyle='#d0dff0';ctx.font='bold 24px Segoe UI';ctx.textAlign='center';ctx.fillText(p+'%',90,98)}
+function bars(){summaryBars.innerHTML=['files','concepts','flows'].map(function(k){var s=manifest.summary[k];return '<div><strong>'+k+'</strong> '+s.covered+'/'+s.total+' ('+s.percentage+'%)<div class="bar"><div class="fill" style="width:'+s.percentage+'%"></div></div></div>'}).join('')}
+function cardStatusButtons(kind,item){var statuses=kind==='files'?['uncovered','read','understood']:kind==='concepts'?['uncovered','taught','quiz-verified']:['uncovered','traced','verified'];return '<div class="status">'+statuses.map(function(st){return '<button onclick="setStatus(\\''+kind+'\\',\\''+item.idOrPath+'\\',\\''+st+'\\')">'+st+'</button>'}).join(' ')+'</div>'}
+function renderFiles(){files.innerHTML='<div class="grid">'+manifest.files.map(function(f){f.idOrPath=f.path;return '<article class="card '+f.status+'"><h3>'+f.path+'</h3><span class="badge">'+f.status+'</span><p>'+f.description+'</p><p>Concepts: '+f.relatedConcepts.join(', ')+'</p><p><a href="learning-guide.html#'+f.guideSection+'">Launch Teaching</a></p>'+cardStatusButtons('files',f)+'</article>'}).join('')+'</div>'}
+function renderConcepts(){concepts.innerHTML='<div class="grid">'+manifest.concepts.map(function(c){c.idOrPath=c.id;return '<article class="card '+c.status+'"><h3>'+c.name+'</h3><span class="badge">'+c.status+'</span><p>'+c.description+'</p><p>Files: '+c.files.join(', ')+'</p><p>Quiz: '+c.quizIds.join(', ')+'</p><p><a href="learning-guide.html#'+c.guideSection+'">Learn</a></p>'+cardStatusButtons('concepts',c)+'</article>'}).join('')+'</div>'}
+function renderFlows(){flows.innerHTML=manifest.flows.map(function(f){f.idOrPath=f.id;return '<article class="card '+f.status+'"><h3>'+f.name+'</h3><span class="badge">'+f.status+'</span><p>'+f.description+'</p><div class="timeline">'+f.steps.map(function(s,i){return '<div class="step"><strong>Step '+(i+1)+'</strong><br>'+s.description+'<br><span class="badge">'+s.file+'</span></div>'}).join('')+'</div><p><a href="learning-guide.html#'+f.guideSection+'">Learn</a></p>'+cardStatusButtons('flows',f)+'</article>'}).join('')}
+function renderGaps(){var uf=manifest.files.filter(function(x){return x.status!=='understood'}),uc=manifest.concepts.filter(function(x){return x.status!=='quiz-verified'}),ul=manifest.flows.filter(function(x){return x.status!=='verified'});gaps.innerHTML='<div class="panel"><h2>Uncovered Files</h2>'+uf.map(function(x){return '<p><a href="learning-guide.html#'+x.guideSection+'">'+x.path+'</a> - '+x.status+'</p>'}).join('')+'<h2>Uncovered Concepts</h2>'+uc.map(function(x){return '<p><a href="learning-guide.html#'+x.guideSection+'">'+x.name+'</a> - '+x.status+'</p>'}).join('')+'<h2>Uncovered Flows</h2>'+ul.map(function(x){return '<p><a href="learning-guide.html#'+x.guideSection+'">'+x.name+'</a> - '+x.status+'</p>'}).join('')+'</div>'}
+function setStatus(kind,id,status){manifest[kind].forEach(function(x){if((kind==='files'?x.path:x.id)===id){x.status=status;x.updatedAt=new Date().toISOString()}});var s=getState();s.manifest=manifest;setState(s);renderAll()}
+function renderAll(){applyQuizSync();recompute();drawDonut();bars();renderFiles();renderConcepts();renderFlows();renderGaps()}
+function showTab(id,btn){document.querySelectorAll('.tab').forEach(function(t){t.classList.add('hidden')});document.getElementById(id).classList.remove('hidden');document.querySelectorAll('.tabs button').forEach(function(b){b.classList.remove('active')});btn.classList.add('active')}
+function exportManifest(){var blob=new Blob([JSON.stringify(manifest,null,2)],{type:'application/json'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='cognitive-coverage.json';a.click();URL.revokeObjectURL(a.href)}
+function importManifest(e){var file=e.target.files[0];if(!file)return;var r=new FileReader();r.onload=function(){manifest=JSON.parse(r.result);renderAll()};r.readAsText(file)}
+renderAll();
+</script>
+</main>
+</body>
+</html>

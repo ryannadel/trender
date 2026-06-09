@@ -1,0 +1,13 @@
+.env
+.env.local
+local.settings.json
+.venv/
+node_modules/
+.rayfin-tmp/
+.azurite/
+dist/
+__pycache__/
+*.py[cod]
+data/
+data-smoke/
+
