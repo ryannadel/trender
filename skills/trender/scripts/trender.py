@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -23,7 +24,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.1.1"
+VERSION = "0.1.3"
 
 
 @dataclass(frozen=True)
@@ -117,6 +118,7 @@ def main() -> int:
     themes = analyze_trends(
         clusters=clusters,
         evidence=evidence,
+        topic=topic,
         primary_window=primary_window,
         compare_windows=compare_windows,
     )
@@ -127,6 +129,7 @@ def main() -> int:
         "compare_windows": [serialize_window(window) for window in compare_windows],
         "retrieval_days": required_lookback,
         "source_counts": dict(Counter(item.source for item in evidence)),
+        "coverage_notes": coverage_notes(evidence),
         "themes": [serialize_theme(theme) for theme in themes],
         "source_count": len(evidence),
         "last30days_dir": str(last30days_dir),
@@ -202,12 +205,15 @@ def run_last30days(
     deep: bool,
     mock: bool,
 ) -> dict[str, Any]:
+    plan_path = write_trender_plan(topic)
     cmd = [
         resolve_python_for_last30days(),
         str(last30days_dir / "scripts" / "last30days.py"),
         topic,
         "--emit=json",
         f"--days={days}",
+        "--plan",
+        str(plan_path),
     ]
     if search:
         cmd.extend(["--search", search])
@@ -220,24 +226,122 @@ def run_last30days(
 
     env = os.environ.copy()
     env.setdefault("LAST30DAYS_SKIP_PREFLIGHT", "1")
-    proc = subprocess.run(
-        cmd,
-        cwd=str(last30days_dir),
-        env=env,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if proc.returncode != 0:
-        raise SystemExit(
-            "last30days retrieval failed.\n"
-            f"Command: {' '.join(cmd)}\n"
-            f"STDERR:\n{proc.stderr}\nSTDOUT:\n{proc.stdout[-4000:]}"
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(last30days_dir),
+            env=env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
         )
-    return parse_json_from_mixed_output(proc.stdout)
+        if proc.returncode != 0:
+            raise SystemExit(
+                "last30days retrieval failed.\n"
+                f"Command: {' '.join(cmd)}\n"
+                f"STDERR:\n{proc.stderr}\nSTDOUT:\n{proc.stdout[-4000:]}"
+            )
+        return parse_json_from_mixed_output(proc.stdout)
+    finally:
+        try:
+            plan_path.unlink()
+        except OSError:
+            pass
+
+
+def write_trender_plan(topic: str) -> Path:
+    plan = build_trender_plan(topic)
+    handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix="-trender-plan.json", delete=False)
+    with handle:
+        json.dump(plan, handle, indent=2)
+    return Path(handle.name)
+
+
+def build_trender_plan(topic: str) -> dict[str, Any]:
+    core = topic.strip()
+    quoted = core
+    sources = [
+        "reddit",
+        "x",
+        "youtube",
+        "tiktok",
+        "instagram",
+        "hackernews",
+        "bluesky",
+        "truthsocial",
+        "grounding",
+        "github",
+        "perplexity",
+        "threads",
+        "pinterest",
+        "xquik",
+        "digg",
+        "polymarket",
+        "xiaohongshu",
+    ]
+    source_weights = {source: 1.0 for source in sources}
+    source_weights.update(
+        {
+            "hackernews": 1.35,
+            "github": 1.3,
+            "reddit": 1.25,
+            "x": 1.2,
+            "grounding": 1.2,
+            "youtube": 1.1,
+            "digg": 1.1,
+        }
+    )
+    subqueries = [
+        {
+            "label": "primary",
+            "search_query": quoted,
+            "ranking_query": f"What recent evidence shows {core} changing, accelerating, or becoming important?",
+            "sources": sources,
+            "weight": 1.2,
+        },
+        {
+            "label": "implementations",
+            "search_query": f"{core} implementation open source github release",
+            "ranking_query": f"Which concrete projects, repos, releases, or implementations show momentum around {core}?",
+            "sources": sources,
+            "weight": 1.0,
+        },
+        {
+            "label": "research-and-claims",
+            "search_query": f"{core} research paper benchmark evaluation case study",
+            "ranking_query": f"What papers, benchmarks, evaluations, or case studies provide evidence for {core}?",
+            "sources": sources,
+            "weight": 1.0,
+        },
+        {
+            "label": "community-friction",
+            "search_query": f"{core} problems limitations adoption workflows examples",
+            "ranking_query": f"What are practitioners saying about use cases, limitations, adoption, and workflow friction for {core}?",
+            "sources": sources,
+            "weight": 0.95,
+        },
+        {
+            "label": "adjacent-phrasing",
+            "search_query": f"{core} self improving autonomous agents learning from feedback memory reflection",
+            "ranking_query": f"What adjacent terminology or related phrases point to the same trend as {core}?",
+            "sources": sources,
+            "weight": 0.85,
+        },
+    ]
+    return {
+        "intent": "concept",
+        "freshness_mode": "balanced_recent",
+        "cluster_mode": "story",
+        "source_weights": source_weights,
+        "subqueries": subqueries,
+        "notes": [
+            "Generated by Trender to improve recall for trend analysis.",
+            "Prefer concrete time-stamped evidence, implementations, practitioner discussion, and cross-source corroboration.",
+        ],
+    }
 
 
 def resolve_python_for_last30days() -> str:
@@ -329,6 +433,7 @@ def analyze_trends(
     *,
     clusters: list[dict[str, Any]],
     evidence: list[EvidenceItem],
+    topic: str,
     primary_window: Window,
     compare_windows: list[Window],
 ) -> list[TrendTheme]:
@@ -352,6 +457,7 @@ def analyze_trends(
                 str(cluster.get("title") or "Untitled theme"),
                 cluster_items,
                 all_windows,
+                topic=topic,
                 compare_mode=bool(compare_windows),
             )
         )
@@ -361,8 +467,17 @@ def analyze_trends(
         for item in evidence:
             grouped[item.source].append(item)
         for source, items in grouped.items():
-            themes.append(theme_from_items(f"{source} signal", items, all_windows, compare_mode=bool(compare_windows)))
+            themes.append(
+                theme_from_items(
+                    f"{source} signal",
+                    items,
+                    all_windows,
+                    topic=topic,
+                    compare_mode=bool(compare_windows),
+                )
+            )
 
+    themes = [theme for theme in themes if theme.score > 0]
     themes.sort(key=lambda theme: (direction_rank(theme.direction), theme.momentum, theme.score), reverse=True)
     return themes[:12]
 
@@ -372,14 +487,29 @@ def theme_from_items(
     items: list[EvidenceItem],
     windows: list[Window],
     *,
+    topic: str,
     compare_mode: bool,
 ) -> TrendTheme:
+    relevance = theme_relevance(topic, title, items)
+    if relevance < 0.34:
+        return TrendTheme(
+            title=title,
+            direction="filtered",
+            momentum=0.0,
+            current_count=0,
+            baseline_count=0,
+            source_diversity=0,
+            score=0.0,
+            windows={window.label: 0 for window in windows},
+            sources=[],
+            evidence=[],
+        )
     counts = {window.label: count_items(items, window) for window in windows}
     baseline, current, baseline_rate, current_rate, current_window = compute_window_stats(counts, windows, compare_mode)
     momentum = compute_momentum(baseline_rate, current_rate)
     direction = classify_direction(baseline, current, momentum, items, current_window)
     sources = sorted({item.source for item in items})
-    score = sum(item.score for item in items) + (len(sources) * 5) + (momentum * 10)
+    score = (sum(item.score for item in items) * relevance) + (len(sources) * 5) + (momentum * 10)
     return TrendTheme(
         title=title,
         direction=direction,
@@ -498,6 +628,68 @@ def classify_direction(
 
 def direction_rank(direction: str) -> int:
     return {"emerging": 4, "rising": 3, "stable": 2, "fading": 1}.get(direction, 0)
+
+
+def theme_relevance(topic: str, title: str, items: list[EvidenceItem]) -> float:
+    text = " ".join([title, *[item.title for item in items], *[item.body[:500] for item in items]]).lower()
+    normalized_topic = topic.lower().strip()
+    tokens = topic_tokens(topic)
+    if not tokens:
+        return 1.0
+    matched = sum(1 for token in tokens if token in text)
+    score = matched / len(tokens)
+    if normalized_topic and normalized_topic in text:
+        score += 0.6
+    if "self" in tokens and any(term in text for term in ["self improving", "self-improving", "self learning", "self-learning"]):
+        score += 0.4
+    if any(token in tokens for token in ["agent", "agents", "agentic"]) and any(
+        term in text for term in ["agent", "agents", "agentic", "autonomous"]
+    ):
+        score += 0.2
+    if any(term in text for term in ["feedback", "reflection", "memory", "learning", "improving", "self-upgrading"]):
+        score += 0.15
+    if is_self_improvement_topic(tokens) and not has_self_improvement_signal(text):
+        score = min(score, 0.25)
+    return min(score, 1.5)
+
+
+def topic_tokens(topic: str) -> list[str]:
+    stop = {"the", "a", "an", "and", "or", "of", "for", "to", "in", "on", "with", "ai"}
+    raw = re.findall(r"[a-z0-9][a-z0-9-]{1,}", topic.lower())
+    tokens = []
+    for token in raw:
+        token = token.rstrip("s")
+        if token and token not in stop and token not in tokens:
+            tokens.append(token)
+    return tokens
+
+
+def is_self_improvement_topic(tokens: list[str]) -> bool:
+    return "self" in tokens and any(token in tokens for token in ["improving", "improv", "learning", "learn"])
+
+
+def has_self_improvement_signal(text: str) -> bool:
+    return any(
+        term in text
+        for term in [
+            "self improving",
+            "self-improving",
+            "self learning",
+            "self-learning",
+            "self-upgrading",
+            "self upgrading",
+            "improving",
+            "improvement",
+            "learns",
+            "learning",
+            "feedback",
+            "reflection",
+            "reflective",
+            "adaptation",
+            "adapting",
+            "memory",
+        ]
+    )
 
 
 def evidence_score(raw: dict[str, Any]) -> float:
@@ -641,6 +833,8 @@ def render_markdown(payload: dict[str, Any], html_path: Path | None = None, json
     source_counts = payload.get("source_counts", {})
     if source_counts:
         lines.append("Source coverage: " + ", ".join(f"{source}={count}" for source, count in sorted(source_counts.items())))
+    for note in payload.get("coverage_notes", []):
+        lines.append(f"Coverage note: {note}")
     if html_path:
         lines.append(f"HTML trend map: {html_path}")
     if json_path:
@@ -702,6 +896,29 @@ a {{ color: #93c5fd; }} pre {{ white-space: pre-wrap; color: #cbd5e1; }}
 def slugify(value: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.lower()).strip("-")
     return slug or "trend"
+
+
+def coverage_notes(evidence: list[EvidenceItem]) -> list[str]:
+    active = sorted({item.source for item in evidence})
+    notes: list[str] = []
+    if len(active) <= 3:
+        notes.append(
+            "Only "
+            + ", ".join(active or ["no sources"])
+            + " returned evidence. Treat source-diversity conclusions as provisional."
+        )
+    missing_high_signal = [
+        source
+        for source in ["x", "youtube", "tiktok", "grounding", "perplexity", "digg"]
+        if source not in active
+    ]
+    if missing_high_signal:
+        notes.append(
+            "High-signal sources not represented in this run: "
+            + ", ".join(missing_high_signal)
+            + ". Configure the corresponding last30days credentials/backends for broader coverage."
+        )
+    return notes
 
 
 if __name__ == "__main__":
