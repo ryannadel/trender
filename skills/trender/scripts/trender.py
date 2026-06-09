@@ -23,7 +23,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 
 
 @dataclass(frozen=True)
@@ -347,34 +347,37 @@ def analyze_trends(
                 used_ids.add(match.id)
         if not cluster_items:
             continue
-        themes.append(theme_from_items(str(cluster.get("title") or "Untitled theme"), cluster_items, all_windows))
+        themes.append(
+            theme_from_items(
+                str(cluster.get("title") or "Untitled theme"),
+                cluster_items,
+                all_windows,
+                compare_mode=bool(compare_windows),
+            )
+        )
 
     if not themes:
         grouped: dict[str, list[EvidenceItem]] = defaultdict(list)
         for item in evidence:
             grouped[item.source].append(item)
         for source, items in grouped.items():
-            themes.append(theme_from_items(f"{source} signal", items, all_windows))
+            themes.append(theme_from_items(f"{source} signal", items, all_windows, compare_mode=bool(compare_windows)))
 
     themes.sort(key=lambda theme: (direction_rank(theme.direction), theme.momentum, theme.score), reverse=True)
     return themes[:12]
 
 
-def theme_from_items(title: str, items: list[EvidenceItem], windows: list[Window]) -> TrendTheme:
+def theme_from_items(
+    title: str,
+    items: list[EvidenceItem],
+    windows: list[Window],
+    *,
+    compare_mode: bool,
+) -> TrendTheme:
     counts = {window.label: count_items(items, window) for window in windows}
-    ordered = [counts[window.label] for window in windows]
-    if len(ordered) >= 2:
-        baseline = ordered[0]
-        current = ordered[-1]
-        baseline_rate = baseline / max(1, window_days(windows[0]))
-        current_rate = current / max(1, window_days(windows[-1]))
-    else:
-        current = ordered[0] if ordered else 0
-        baseline = 0
-        baseline_rate = 0.0
-        current_rate = current / max(1, window_days(windows[0])) if windows else 0.0
+    baseline, current, baseline_rate, current_rate, current_window = compute_window_stats(counts, windows, compare_mode)
     momentum = compute_momentum(baseline_rate, current_rate)
-    direction = classify_direction(baseline, current, momentum, items, windows[-1] if windows else None)
+    direction = classify_direction(baseline, current, momentum, items, current_window)
     sources = sorted({item.source for item in items})
     score = sum(item.score for item in items) + (len(sources) * 5) + (momentum * 10)
     return TrendTheme(
@@ -388,6 +391,48 @@ def theme_from_items(title: str, items: list[EvidenceItem], windows: list[Window
         windows=counts,
         sources=sources,
         evidence=sorted(items, key=lambda item: item.score, reverse=True)[:5],
+    )
+
+
+def compute_window_stats(
+    counts: dict[str, int],
+    windows: list[Window],
+    compare_mode: bool,
+) -> tuple[int, int, float, float, Window | None]:
+    if not windows:
+        return 0, 0, 0.0, 0.0, None
+
+    if compare_mode:
+        baseline_window = windows[0]
+        current_window = windows[-1]
+        baseline = counts[baseline_window.label]
+        current = counts[current_window.label]
+        return (
+            baseline,
+            current,
+            baseline / window_days(baseline_window),
+            current / window_days(current_window),
+            current_window,
+        )
+
+    if len(windows) == 1:
+        current = counts[windows[0].label]
+        return 0, current, 0.0, current / window_days(windows[0]), windows[0]
+
+    midpoint = max(1, len(windows) // 2)
+    baseline_windows = windows[:midpoint]
+    current_windows = windows[midpoint:]
+    baseline = sum(counts[window.label] for window in baseline_windows)
+    current = sum(counts[window.label] for window in current_windows)
+    baseline_days = sum(window_days(window) for window in baseline_windows)
+    current_days = sum(window_days(window) for window in current_windows)
+    current_window = Window("recent half", current_windows[0].start, current_windows[-1].end)
+    return (
+        baseline,
+        current,
+        baseline / max(1, baseline_days),
+        current / max(1, current_days),
+        current_window,
     )
 
 
