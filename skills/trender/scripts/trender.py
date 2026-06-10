@@ -24,7 +24,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.1.6"
+VERSION = "0.1.7"
 
 
 @dataclass(frozen=True)
@@ -162,18 +162,24 @@ def main() -> int:
     elif args.emit == "html":
         html_path = save_dir / f"{slug}-trend-map.html"
         html_path.write_text(render_html(payload), encoding="utf-8")
-        print(render_markdown(payload, html_path=html_path))
+        write_markdown(render_markdown(payload, html_path=html_path))
     else:
-        print(render_markdown(payload))
+        write_markdown(render_markdown(payload))
 
     if args.emit == "all":
         json_path = save_dir / f"{slug}-trend-map.json"
         html_path = save_dir / f"{slug}-trend-map.html"
         json_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
         html_path.write_text(render_html(payload), encoding="utf-8")
-        print(render_markdown(payload, html_path=html_path, json_path=json_path))
+        write_markdown(render_markdown(payload, html_path=html_path, json_path=json_path))
 
     return 0
+
+
+def write_markdown(markdown: str) -> None:
+    sys.stdout.write(markdown.replace("\n", os.linesep))
+    if not markdown.endswith("\n"):
+        sys.stdout.write(os.linesep)
 
 
 def run_last30days_passthrough(last30days_dir: Path, args: list[str]) -> int:
