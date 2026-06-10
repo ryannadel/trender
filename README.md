@@ -2,13 +2,15 @@
 
 Trender is a coding-agent skill that maps how a topic evolves across flexible time windows.
 
-It combines:
+It is self-contained as a skill:
 
 - bundled `last30days` retrieval for social/community/engagement sources
-- native Trender web research through OpenAI web search or Brave Search when configured
+- host-agent web evidence via `--agent-web-file`
 - adaptive time buckets and compare windows
 - general-purpose trend grouping and momentum scoring
 - visual self-contained HTML trend-map reports
+
+The script does not call OpenAI, Brave, or other web APIs directly. For deep web research, the coding agent that is running the skill should use its own web/deep-research tools, save evidence to JSON, and pass that file to Trender.
 
 ## Install locally
 
@@ -41,23 +43,9 @@ python .\skills\trender\scripts\trender.py --diagnose
 python .\skills\trender\scripts\trender.py setup
 ```
 
-Native Trender web research runs automatically when either key is configured:
+## Add host-agent web evidence
 
-```powershell
-$env:OPENAI_API_KEY="..."
-# or
-$env:BRAVE_API_KEY="..."
-```
-
-You can control native web research explicitly:
-
-```powershell
-python .\skills\trender\scripts\trender.py "MCP servers" --web-research=openai
-python .\skills\trender\scripts\trender.py "MCP servers" --web-research=brave
-python .\skills\trender\scripts\trender.py "MCP servers" --web-research=off
-```
-
-Because Trender is an agent skill, the preferred deep-research path is for the host coding agent to use its own WebSearch/deep-research tools, save findings, and pass them to Trender:
+Have the coding agent write a JSON file:
 
 ```json
 {
@@ -73,6 +61,8 @@ Because Trender is an agent skill, the preferred deep-research path is for the h
   ]
 }
 ```
+
+Then run:
 
 ```powershell
 python .\skills\trender\scripts\trender.py "MCP servers" --agent-web-file .\agent-web.json

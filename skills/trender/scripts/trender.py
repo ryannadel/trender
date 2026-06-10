@@ -17,9 +17,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import urllib.error
-import urllib.parse
-import urllib.request
 import webbrowser
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
@@ -28,7 +25,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.4.1"
+VERSION = "0.5.0"
 
 
 @dataclass(frozen=True)
@@ -82,13 +79,7 @@ def main() -> int:
     parser.add_argument("--quick", action="store_true", help="Pass --quick through to last30days.")
     parser.add_argument("--deep", action="store_true", help="Pass --deep through to last30days.")
     parser.add_argument("--mock", action="store_true", help="Use last30days mock retrieval fixtures.")
-    parser.add_argument(
-        "--web-research",
-        choices=["auto", "off", "openai", "brave", "mock"],
-        default=os.getenv("TRENDER_WEB_RESEARCH", "auto"),
-        help="Trender-owned web research adapter. Default: auto.",
-    )
-    parser.add_argument("--web-results", type=int, default=12, help="Maximum native web research results to add.")
+    parser.add_argument("--web-research", choices=["off", "mock"], default="off", help="Deprecated. Use --agent-web-file. 'mock' is kept for tests.")
     parser.add_argument(
         "--agent-web-file",
         default=os.getenv("TRENDER_AGENT_WEB_FILE"),
@@ -148,12 +139,7 @@ def main() -> int:
     )
     evidence = flatten_evidence(raw_report)
     clusters = raw_report.get("clusters", [])
-    native_web_items = run_native_web_research(
-        topic=topic,
-        window=primary_window,
-        mode=args.web_research,
-        max_results=args.web_results,
-    )
+    native_web_items = mock_web_research(topic, primary_window) if args.web_research == "mock" else []
     if native_web_items:
         evidence.extend(native_web_items)
         clusters.extend(clusters_from_native_web(native_web_items))
@@ -188,7 +174,7 @@ def main() -> int:
             "items": len(native_web_items),
             "agent_items": len(agent_web_items),
             "agent_web_file": str(args.agent_web_file or ""),
-            "available": native_web_availability(),
+            "available": {"agent_web_file": bool(args.agent_web_file)},
         },
     }
 
@@ -224,13 +210,6 @@ def main() -> int:
     return 0
 
 
-def native_web_availability() -> dict[str, bool]:
-    return {
-        "openai": bool(os.getenv("OPENAI_API_KEY")),
-        "brave": bool(os.getenv("BRAVE_API_KEY")),
-    }
-
-
 def load_agent_web_research(
     *,
     path: str | None,
@@ -252,137 +231,6 @@ def load_agent_web_research(
         topic=topic,
         window=window,
     )
-
-
-def run_native_web_research(
-    *,
-    topic: str,
-    window: Window,
-    mode: str,
-    max_results: int,
-) -> list[EvidenceItem]:
-    if mode == "off":
-        return []
-    if mode == "mock":
-        return mock_web_research(topic, window)
-
-    if mode in {"auto", "openai"} and os.getenv("OPENAI_API_KEY"):
-        try:
-            return openai_web_research(topic, window, max_results)
-        except Exception as exc:
-            sys.stderr.write(f"[trender] OpenAI web research failed: {exc}\n")
-            if mode == "openai":
-                return []
-
-    if mode in {"auto", "brave"} and os.getenv("BRAVE_API_KEY"):
-        try:
-            return brave_web_research(topic, window, max_results)
-        except Exception as exc:
-            sys.stderr.write(f"[trender] Brave web research failed: {exc}\n")
-            return []
-
-    return []
-
-
-def openai_web_research(topic: str, window: Window, max_results: int) -> list[EvidenceItem]:
-    prompt = {
-        "task": "Find dated web evidence for trend analysis.",
-        "topic": topic,
-        "window_start": window.start.isoformat(),
-        "window_end": window.end.isoformat(),
-        "instructions": [
-            "Search broadly across the public web for concrete, dated evidence.",
-            "Prefer primary sources, announcements, papers, release notes, detailed analysis, and credible reporting.",
-            "Return only sources with a date inside the requested window when possible.",
-            "Group each item with a concise trend_theme that generalizes the evidence.",
-        ],
-        "schema": {
-            "items": [
-                {
-                    "title": "string",
-                    "url": "string",
-                    "published_at": "YYYY-MM-DD or empty",
-                    "summary": "2 sentence evidence summary",
-                    "trend_theme": "short generalized trend theme",
-                    "relevance_score": "0.0-1.0",
-                }
-            ]
-        },
-        "max_items": max_results,
-    }
-    body = {
-        "model": os.getenv("TRENDER_WEB_MODEL", os.getenv("TRENDER_OPENAI_MODEL", "gpt-5.4")),
-        "tools": [{"type": "web_search_preview"}],
-        "input": (
-            "You are a web research component for a trend-analysis system. "
-            "Return JSON only.\n\n"
-            + json.dumps(prompt, indent=2)
-        ),
-    }
-    request = urllib.request.Request(
-        "https://api.openai.com/v1/responses",
-        data=json.dumps(body).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=90) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-    text = extract_openai_text(payload)
-    parsed = parse_json_from_text(text)
-    return web_items_from_payload(parsed.get("items", []), source="trender-web-openai", topic=topic, window=window)
-
-
-def brave_web_research(topic: str, window: Window, max_results: int) -> list[EvidenceItem]:
-    queries = [
-        topic,
-        f"{topic} release announcement research",
-        f"{topic} adoption examples analysis",
-    ]
-    seen: set[str] = set()
-    items: list[EvidenceItem] = []
-    for query in queries:
-        params = urllib.parse.urlencode({"q": query, "count": min(10, max_results), "search_lang": "en"})
-        request = urllib.request.Request(
-            f"https://api.search.brave.com/res/v1/web/search?{params}",
-            headers={
-                "Accept": "application/json",
-                "X-Subscription-Token": os.environ["BRAVE_API_KEY"],
-            },
-            method="GET",
-        )
-        with urllib.request.urlopen(request, timeout=30) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-        for result in payload.get("web", {}).get("results", []):
-            url = str(result.get("url") or "")
-            if not url or url in seen:
-                continue
-            seen.add(url)
-            published = try_parse_date(result.get("age")) or window.end
-            if not (window.start <= published <= window.end):
-                continue
-            items.append(
-                EvidenceItem(
-                    id=url,
-                    source="trender-web-brave",
-                    title=str(result.get("title") or url),
-                    body=str(result.get("description") or ""),
-                    url=url,
-                    published_at=published,
-                    score=35.0,
-                    raw={
-                        "title": result.get("title"),
-                        "url": url,
-                        "body": result.get("description"),
-                        "trend_theme": classify_web_result_theme(topic, result.get("title") or "", result.get("description") or ""),
-                    },
-                )
-            )
-            if len(items) >= max_results:
-                return items
-    return items
 
 
 def mock_web_research(topic: str, window: Window) -> list[EvidenceItem]:
@@ -478,28 +326,6 @@ def classify_web_result_theme(topic: str, title: str, body: str) -> str:
     if any(term in text for term in ["problem", "risk", "limit", "issue", "bug", "cost", "pricing"]):
         return f"{topic_label}: problems, limits, and adoption friction"
     return f"{topic_label}: web evidence"
-
-
-def extract_openai_text(payload: dict[str, Any]) -> str:
-    if isinstance(payload.get("output_text"), str):
-        return payload["output_text"]
-    texts: list[str] = []
-    for output in payload.get("output", []):
-        for content in output.get("content", []) if isinstance(output, dict) else []:
-            if isinstance(content, dict) and isinstance(content.get("text"), str):
-                texts.append(content["text"])
-    return "\n".join(texts)
-
-
-def parse_json_from_text(text: str) -> dict[str, Any]:
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start >= 0 and end > start:
-            return json.loads(text[start : end + 1])
-        raise
 
 
 def write_markdown(markdown: str) -> None:
@@ -1463,12 +1289,10 @@ def coverage_notes(evidence: list[EvidenceItem]) -> list[str]:
             + ", ".join(missing_high_signal)
             + ". Configure the corresponding last30days credentials/backends for broader coverage."
         )
-    if not any(source.startswith("trender-web") for source in active):
-        availability = native_web_availability()
-        if not any(availability.values()):
-            notes.append(
-                "Native Trender web research did not run because OPENAI_API_KEY or BRAVE_API_KEY is not configured."
-            )
+    if "trender-agent-web" not in active:
+        notes.append(
+            "No host-agent web evidence was provided. For broader web coverage, have the coding agent write a JSON evidence file and pass --agent-web-file."
+        )
     return notes
 
 

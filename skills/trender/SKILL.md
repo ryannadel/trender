@@ -1,6 +1,6 @@
 ---
 name: trender
-version: "0.4.1"
+version: "0.5.0"
 description: "Map how a topic is evolving across flexible time windows using last30days-style multi-source research plus trend scoring and HTML trend maps."
 argument-hint: 'trender "agentic AI" --days=90 | trender "MCP servers" --compare=7,30 | trender "AI coding agents" --from=2026-01-01 --to=2026-06-01 --emit=html'
 allowed-tools: Bash, Read, Write, AskUserQuestion, WebSearch
@@ -17,11 +17,9 @@ metadata:
       optionalEnv:
         - LAST30DAYS_SKILL_DIR
         - SCRAPECREATORS_API_KEY
-        - OPENAI_API_KEY
         - XAI_API_KEY
         - OPENROUTER_API_KEY
         - PARALLEL_API_KEY
-        - BRAVE_API_KEY
         - APIFY_API_TOKEN
         - AUTH_TOKEN
         - CT0
@@ -51,7 +49,6 @@ Trender uses broad `last30days`-style research as its evidence substrate, then a
 - compare windows such as 7 vs 30 days or 30 vs 90 days
 - optional self-contained HTML trend maps
 - host-agent web research via `--agent-web-file`
-- native script-level web research through OpenAI web search or Brave Search when configured
 
 ## Usage
 
@@ -61,9 +58,6 @@ Run the engine script from this skill directory:
 python3 "$SKILL_DIR/scripts/trender.py" "agentic AI" --days=90
 python3 "$SKILL_DIR/scripts/trender.py" "agentic AI" --compare=7,30
 python3 "$SKILL_DIR/scripts/trender.py" "MCP servers" --from=2026-01-01 --to=2026-06-01 --emit=json
-python3 "$SKILL_DIR/scripts/trender.py" "MCP servers" --web-research=openai
-python3 "$SKILL_DIR/scripts/trender.py" "MCP servers" --web-research=brave
-python3 "$SKILL_DIR/scripts/trender.py" "MCP servers" --web-research=off
 python3 "$SKILL_DIR/scripts/trender.py" "MCP servers" --agent-web-file /tmp/trender-agent-web.json
 python3 "$SKILL_DIR/scripts/trender.py" --diagnose
 python3 "$SKILL_DIR/scripts/trender.py" setup
