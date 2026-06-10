@@ -24,7 +24,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.1.7"
+VERSION = "0.1.8"
 
 
 @dataclass(frozen=True)
@@ -177,9 +177,15 @@ def main() -> int:
 
 
 def write_markdown(markdown: str) -> None:
-    sys.stdout.write(markdown.replace("\n", os.linesep))
+    output = markdown.replace("\n", os.linesep)
     if not markdown.endswith("\n"):
-        sys.stdout.write(os.linesep)
+        output += os.linesep
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is not None:
+        buffer.write(output.encode("utf-8", errors="replace"))
+        buffer.flush()
+    else:
+        sys.stdout.write(output)
 
 
 def run_last30days_passthrough(last30days_dir: Path, args: list[str]) -> int:
