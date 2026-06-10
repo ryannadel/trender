@@ -28,7 +28,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 
 
 @dataclass(frozen=True)
@@ -89,6 +89,14 @@ def main() -> int:
         help="Trender-owned web research adapter. Default: auto.",
     )
     parser.add_argument("--web-results", type=int, default=12, help="Maximum native web research results to add.")
+    parser.add_argument(
+        "--agent-web-file",
+        default=os.getenv("TRENDER_AGENT_WEB_FILE"),
+        help=(
+            "JSON file of web evidence gathered by the host coding agent. "
+            "Schema: {items:[{title,url,published_at,summary,trend_theme,relevance_score}]} or a bare list."
+        ),
+    )
     parser.add_argument("--keep-raw", action="store_true", help="Save raw last30days JSON beside Trender outputs.")
     parser.add_argument("--diagnose", action="store_true", help="Show bundled last30days source/provider availability.")
     parser.add_argument("--no-open", action="store_true", help="Do not open generated HTML reports automatically.")
@@ -149,6 +157,14 @@ def main() -> int:
     if native_web_items:
         evidence.extend(native_web_items)
         clusters.extend(clusters_from_native_web(native_web_items))
+    agent_web_items = load_agent_web_research(
+        path=args.agent_web_file,
+        topic=topic,
+        window=primary_window,
+    )
+    if agent_web_items:
+        evidence.extend(agent_web_items)
+        clusters.extend(clusters_from_native_web(agent_web_items))
     themes = analyze_trends(
         clusters=clusters,
         evidence=evidence,
@@ -170,6 +186,8 @@ def main() -> int:
         "native_web_research": {
             "mode": args.web_research,
             "items": len(native_web_items),
+            "agent_items": len(agent_web_items),
+            "agent_web_file": str(args.agent_web_file or ""),
             "available": native_web_availability(),
         },
     }
@@ -211,6 +229,29 @@ def native_web_availability() -> dict[str, bool]:
         "openai": bool(os.getenv("OPENAI_API_KEY")),
         "brave": bool(os.getenv("BRAVE_API_KEY")),
     }
+
+
+def load_agent_web_research(
+    *,
+    path: str | None,
+    topic: str,
+    window: Window,
+) -> list[EvidenceItem]:
+    if not path:
+        return []
+    source_path = Path(path).expanduser()
+    if not source_path.exists():
+        raise SystemExit(f"--agent-web-file does not exist: {source_path}")
+    payload = json.loads(source_path.read_text(encoding="utf-8"))
+    raw_items = payload.get("items", payload) if isinstance(payload, dict) else payload
+    if not isinstance(raw_items, list):
+        raise SystemExit("--agent-web-file must be a JSON list or an object with an 'items' list")
+    return web_items_from_payload(
+        raw_items,
+        source="trender-agent-web",
+        topic=topic,
+        window=window,
+    )
 
 
 def run_native_web_research(

@@ -57,6 +57,27 @@ python .\skills\trender\scripts\trender.py "MCP servers" --web-research=brave
 python .\skills\trender\scripts\trender.py "MCP servers" --web-research=off
 ```
 
+Because Trender is an agent skill, the preferred deep-research path is for the host coding agent to use its own WebSearch/deep-research tools, save findings, and pass them to Trender:
+
+```json
+{
+  "items": [
+    {
+      "title": "source title",
+      "url": "https://example.com/source",
+      "published_at": "YYYY-MM-DD",
+      "summary": "brief evidence summary",
+      "trend_theme": "generalized theme label",
+      "relevance_score": 0.9
+    }
+  ]
+}
+```
+
+```powershell
+python .\skills\trender\scripts\trender.py "MCP servers" --agent-web-file .\agent-web.json
+```
+
 ## Run
 
 HTML is the default output and opens automatically:

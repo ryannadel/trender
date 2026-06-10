@@ -29,9 +29,12 @@ python3 scripts/trender.py "MCP servers" --from=2026-01-01 --to=2026-06-01 --emi
 python3 scripts/trender.py "MCP servers" --web-research=openai
 python3 scripts/trender.py "MCP servers" --web-research=brave
 python3 scripts/trender.py "MCP servers" --web-research=off
+python3 scripts/trender.py "MCP servers" --agent-web-file /tmp/trender-agent-web.json
 ```
 
 HTML is the default output and opens automatically. Pass `--no-open` to only write the file.
+
+For best results in a coding-agent host, use the host agent's WebSearch/deep-research tools first, write findings to a JSON file with an `items` array, and pass it with `--agent-web-file`.
 
 Run `setup` once to let the bundled `last30days` engine discover browser cookies and write `~/.config/last30days/.env`. Run `--diagnose` to see which sources are currently available.
 

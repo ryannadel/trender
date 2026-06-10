@@ -1,6 +1,6 @@
 ---
 name: trender
-version: "0.3.1"
+version: "0.4.1"
 description: "Map how a topic is evolving across flexible time windows using last30days-style multi-source research plus trend scoring and HTML trend maps."
 argument-hint: 'trender "agentic AI" --days=90 | trender "MCP servers" --compare=7,30 | trender "AI coding agents" --from=2026-01-01 --to=2026-06-01 --emit=html'
 allowed-tools: Bash, Read, Write, AskUserQuestion, WebSearch
@@ -50,6 +50,8 @@ Trender uses broad `last30days`-style research as its evidence substrate, then a
 - momentum and direction scoring
 - compare windows such as 7 vs 30 days or 30 vs 90 days
 - optional self-contained HTML trend maps
+- host-agent web research via `--agent-web-file`
+- native script-level web research through OpenAI web search or Brave Search when configured
 
 ## Usage
 
@@ -62,6 +64,7 @@ python3 "$SKILL_DIR/scripts/trender.py" "MCP servers" --from=2026-01-01 --to=202
 python3 "$SKILL_DIR/scripts/trender.py" "MCP servers" --web-research=openai
 python3 "$SKILL_DIR/scripts/trender.py" "MCP servers" --web-research=brave
 python3 "$SKILL_DIR/scripts/trender.py" "MCP servers" --web-research=off
+python3 "$SKILL_DIR/scripts/trender.py" "MCP servers" --agent-web-file /tmp/trender-agent-web.json
 python3 "$SKILL_DIR/scripts/trender.py" --diagnose
 python3 "$SKILL_DIR/scripts/trender.py" setup
 ```
@@ -86,10 +89,29 @@ python3 "$SKILL_DIR/scripts/trender.py" "agentic AI" --last30days-dir /path/to/l
 
 For normal user-facing output:
 
-1. Run `scripts/trender.py`.
-2. Pass through its Markdown synthesis.
-3. HTML is the default output and opens automatically. Mention the saved HTML path.
-4. Do not invent unsupported trend claims. Every trend should trace back to original source evidence in the output.
+1. Prefer using the host coding agent's WebSearch/deep-research capability before running the script. This skill is agent-native; the script is the trend scorer/renderer, not the only researcher.
+2. Search several query variants for the requested topic and timeframe.
+3. Write the host-agent web evidence to JSON:
+
+```json
+{
+  "items": [
+    {
+      "title": "source title",
+      "url": "https://example.com/source",
+      "published_at": "YYYY-MM-DD",
+      "summary": "brief evidence summary",
+      "trend_theme": "generalized theme label",
+      "relevance_score": 0.9
+    }
+  ]
+}
+```
+
+4. Run `scripts/trender.py` with `--agent-web-file <path>`.
+5. Pass through its Markdown synthesis.
+6. HTML is the default output and opens automatically. Mention the saved HTML path.
+7. Do not invent unsupported trend claims. Every trend should trace back to original source evidence in the output.
 
 ## What Makes Trender Different From last30days
 
