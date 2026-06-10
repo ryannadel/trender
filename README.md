@@ -2,17 +2,15 @@
 
 Trender is a coding-agent skill that maps how a topic evolves across flexible time windows.
 
-It bundles a compatible `last30days` engine for broad multi-source evidence retrieval, then adds Trender-specific analysis:
+It combines:
 
-- flexible lookback windows and explicit date ranges
-- comparison windows such as 7 vs 30 days
-- trend direction classification: emerging, rising, stable, fading
-- source diversity and momentum scoring
-- Markdown, JSON, and self-contained HTML trend-map outputs
+- bundled `last30days` retrieval for social/community/engagement sources
+- native Trender web research through OpenAI web search or Brave Search when configured
+- adaptive time buckets and compare windows
+- general-purpose trend grouping and momentum scoring
+- visual self-contained HTML trend-map reports
 
 ## Install locally
-
-From this repository:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass `
@@ -32,39 +30,36 @@ On macOS/Linux:
 bash ./skills/trender/scripts/install-skill.sh
 ```
 
-To install somewhere else:
+## Configure sources
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass `
-  -File .\skills\trender\scripts\install-skill.ps1 `
-  -Destination "C:\path\to\skills\trender" `
-  -Force
-```
+Trender works out of the box with the free sources available to bundled `last30days` (typically Reddit, Hacker News, Polymarket, and GitHub).
 
-## Run locally
-
-Trender includes its own compatible `last30days` engine under `skills/trender/vendor/last30days`, so no separate install is required for normal use:
+Run:
 
 ```powershell
 python .\skills\trender\scripts\trender.py --diagnose
 python .\skills\trender\scripts\trender.py setup
 ```
 
-`--diagnose` shows which sources are currently available. `setup` runs the bundled `last30days` setup flow, which can discover browser cookies and write `~/.config/last30days/.env`.
+Native Trender web research runs automatically when either key is configured:
 
 ```powershell
-python .\skills\trender\scripts\trender.py "agentic AI" `
-  --compare=7,30 `
-  --emit=all
+$env:OPENAI_API_KEY="..."
+# or
+$env:BRAVE_API_KEY="..."
 ```
 
-To override the bundled engine with another checkout, set:
+You can control native web research explicitly:
 
 ```powershell
-$env:LAST30DAYS_SKILL_DIR="C:\Users\rynadel\last30days-skill-src\skills\last30days"
+python .\skills\trender\scripts\trender.py "MCP servers" --web-research=openai
+python .\skills\trender\scripts\trender.py "MCP servers" --web-research=brave
+python .\skills\trender\scripts\trender.py "MCP servers" --web-research=off
 ```
 
-Then run. HTML is the default and opens automatically:
+## Run
+
+HTML is the default output and opens automatically:
 
 ```powershell
 python .\skills\trender\scripts\trender.py "MCP servers" --days=90
@@ -73,10 +68,15 @@ python .\skills\trender\scripts\trender.py "MCP servers" --days=90
 Use `--no-open` for scripts or CI:
 
 ```powershell
-python .\skills\trender\scripts\trender.py "MCP servers" --days=90 --emit=html --no-open
+python .\skills\trender\scripts\trender.py "MCP servers" --days=90 --no-open
 ```
 
-To intentionally bypass the upstream preflight checks, pass `--skip-last30days-preflight`.
+Other examples:
+
+```powershell
+python .\skills\trender\scripts\trender.py "agentic AI" --compare=7,30 --emit=all
+python .\skills\trender\scripts\trender.py "AI video tools" --from=2026-01-01 --to=2026-06-01
+```
 
 ## Build skill archive
 

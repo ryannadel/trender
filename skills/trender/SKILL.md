@@ -59,6 +59,9 @@ Run the engine script from this skill directory:
 python3 "$SKILL_DIR/scripts/trender.py" "agentic AI" --days=90
 python3 "$SKILL_DIR/scripts/trender.py" "agentic AI" --compare=7,30
 python3 "$SKILL_DIR/scripts/trender.py" "MCP servers" --from=2026-01-01 --to=2026-06-01 --emit=json
+python3 "$SKILL_DIR/scripts/trender.py" "MCP servers" --web-research=openai
+python3 "$SKILL_DIR/scripts/trender.py" "MCP servers" --web-research=brave
+python3 "$SKILL_DIR/scripts/trender.py" "MCP servers" --web-research=off
 python3 "$SKILL_DIR/scripts/trender.py" --diagnose
 python3 "$SKILL_DIR/scripts/trender.py" setup
 ```
