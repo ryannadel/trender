@@ -64,13 +64,13 @@ To override the bundled engine with another checkout, set:
 $env:LAST30DAYS_SKILL_DIR="C:\Users\rynadel\last30days-skill-src\skills\last30days"
 ```
 
-Then run:
+Then run. HTML is the default and opens automatically:
 
 ```powershell
-python .\skills\trender\scripts\trender.py "MCP servers" --days=90 --emit=html
+python .\skills\trender\scripts\trender.py "MCP servers" --days=90
 ```
 
-HTML reports are opened automatically when generated. Use `--no-open` for scripts or CI:
+Use `--no-open` for scripts or CI:
 
 ```powershell
 python .\skills\trender\scripts\trender.py "MCP servers" --days=90 --emit=html --no-open

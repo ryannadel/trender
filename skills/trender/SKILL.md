@@ -1,6 +1,6 @@
 ---
 name: trender
-version: "0.1.9"
+version: "0.2.1"
 description: "Map how a topic is evolving across flexible time windows using last30days-style multi-source research plus trend scoring and HTML trend maps."
 argument-hint: 'trender "agentic AI" --days=90 | trender "MCP servers" --compare=7,30 | trender "AI coding agents" --from=2026-01-01 --to=2026-06-01 --emit=html'
 allowed-tools: Bash, Read, Write, AskUserQuestion, WebSearch
@@ -56,8 +56,8 @@ Trender uses broad `last30days`-style research as its evidence substrate, then a
 Run the engine script from this skill directory:
 
 ```bash
-python3 "$SKILL_DIR/scripts/trender.py" "agentic AI" --days=90 --emit=md
-python3 "$SKILL_DIR/scripts/trender.py" "agentic AI" --compare=7,30 --emit=html
+python3 "$SKILL_DIR/scripts/trender.py" "agentic AI" --days=90
+python3 "$SKILL_DIR/scripts/trender.py" "agentic AI" --compare=7,30
 python3 "$SKILL_DIR/scripts/trender.py" "MCP servers" --from=2026-01-01 --to=2026-06-01 --emit=json
 python3 "$SKILL_DIR/scripts/trender.py" --diagnose
 python3 "$SKILL_DIR/scripts/trender.py" setup
@@ -85,7 +85,7 @@ For normal user-facing output:
 
 1. Run `scripts/trender.py`.
 2. Pass through its Markdown synthesis.
-3. If `--emit=html`, mention the saved HTML path.
+3. HTML is the default output and opens automatically. Mention the saved HTML path.
 4. Do not invent unsupported trend claims. Every trend should trace back to original source evidence in the output.
 
 ## What Makes Trender Different From last30days

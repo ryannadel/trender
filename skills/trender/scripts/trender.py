@@ -25,7 +25,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.1.9"
+VERSION = "0.2.1"
 
 
 @dataclass(frozen=True)
@@ -72,7 +72,7 @@ def main() -> int:
         "--compare",
         help="Compare two lookback windows, e.g. 7,30 or 30,90. Uses current N days vs current M days.",
     )
-    parser.add_argument("--emit", choices=["md", "json", "html", "all"], default="md")
+    parser.add_argument("--emit", choices=["md", "json", "html", "all"], default="html")
     parser.add_argument("--save-dir", default=os.getenv("TRENDER_OUTPUT_DIR", str(Path.home() / "Documents" / "Trender")))
     parser.add_argument("--last30days-dir", default=os.getenv("LAST30DAYS_SKILL_DIR"))
     parser.add_argument("--search", help="Comma-separated source list passed through to last30days.")
@@ -568,7 +568,6 @@ def consolidate_themes(
 def classify_theme_group(topic: str, theme: TrendTheme) -> str:
     text = " ".join(
         [
-            topic,
             theme.title,
             *[item.title for item in theme.evidence],
             *[item.body[:500] for item in theme.evidence],
@@ -767,7 +766,8 @@ def direction_rank(direction: str) -> int:
 
 
 def theme_relevance(topic: str, title: str, items: list[EvidenceItem]) -> float:
-    text = " ".join([title, *[item.title for item in items], *[item.body[:500] for item in items]]).lower()
+    item_text = " ".join([*[item.title for item in items], *[item.body[:500] for item in items]]).lower()
+    text = " ".join([title.lower(), item_text])
     normalized_topic = topic.lower().strip()
     tokens = topic_tokens(topic)
     if not tokens:
@@ -784,7 +784,7 @@ def theme_relevance(topic: str, title: str, items: list[EvidenceItem]) -> float:
         score += 0.2
     if any(term in text for term in ["feedback", "reflection", "memory", "learning", "improving", "self-upgrading"]):
         score += 0.15
-    if is_self_improvement_topic(tokens) and not has_self_improvement_signal(text):
+    if is_self_improvement_topic(tokens) and not has_strict_self_improvement_signal(item_text):
         score = min(score, 0.25)
     return min(score, 1.5)
 
@@ -801,7 +801,9 @@ def topic_tokens(topic: str) -> list[str]:
 
 
 def is_self_improvement_topic(tokens: list[str]) -> bool:
-    return "self" in tokens and any(token in tokens for token in ["improving", "improv", "learning", "learn"])
+    return "self" in tokens and any(
+        token in tokens for token in ["improving", "improvement", "improv", "learning", "learn"]
+    )
 
 
 def has_self_improvement_signal(text: str) -> bool:
@@ -824,6 +826,40 @@ def has_self_improvement_signal(text: str) -> bool:
             "adaptation",
             "adapting",
             "memory",
+        ]
+    )
+
+
+def has_strict_self_improvement_signal(text: str) -> bool:
+    if any(
+        term in text
+        for term in [
+            "self improving",
+            "self-improving",
+            "self learning",
+            "self-learning",
+            "self-upgrading",
+            "self upgrading",
+            "self-verifying",
+            "self verifying",
+            "self-referential",
+            "self referential",
+        ]
+    ):
+        return True
+    return "self" in text and any(
+        term in text
+        for term in [
+            "improving",
+            "improvement",
+            "learns",
+            "learning",
+            "upgrading",
+            "adaptation",
+            "adapting",
+            "reflection",
+            "reflective",
+            "feedback",
         ]
     )
 
