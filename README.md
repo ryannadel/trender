@@ -70,6 +70,12 @@ Then run:
 python .\skills\trender\scripts\trender.py "MCP servers" --days=90 --emit=html
 ```
 
+HTML reports are opened automatically when generated. Use `--no-open` for scripts or CI:
+
+```powershell
+python .\skills\trender\scripts\trender.py "MCP servers" --days=90 --emit=html --no-open
+```
+
 To intentionally bypass the upstream preflight checks, pass `--skip-last30days-preflight`.
 
 ## Build skill archive

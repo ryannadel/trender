@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import webbrowser
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -24,7 +25,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.1.8"
+VERSION = "0.1.9"
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,7 @@ def main() -> int:
     parser.add_argument("--mock", action="store_true", help="Use last30days mock retrieval fixtures.")
     parser.add_argument("--keep-raw", action="store_true", help="Save raw last30days JSON beside Trender outputs.")
     parser.add_argument("--diagnose", action="store_true", help="Show bundled last30days source/provider availability.")
+    parser.add_argument("--no-open", action="store_true", help="Do not open generated HTML reports automatically.")
     parser.add_argument(
         "--skip-last30days-preflight",
         action="store_true",
@@ -162,6 +164,8 @@ def main() -> int:
     elif args.emit == "html":
         html_path = save_dir / f"{slug}-trend-map.html"
         html_path.write_text(render_html(payload), encoding="utf-8")
+        if not args.no_open:
+            open_html_report(html_path)
         write_markdown(render_markdown(payload, html_path=html_path))
     else:
         write_markdown(render_markdown(payload))
@@ -171,6 +175,8 @@ def main() -> int:
         html_path = save_dir / f"{slug}-trend-map.html"
         json_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
         html_path.write_text(render_html(payload), encoding="utf-8")
+        if not args.no_open:
+            open_html_report(html_path)
         write_markdown(render_markdown(payload, html_path=html_path, json_path=json_path))
 
     return 0
@@ -186,6 +192,16 @@ def write_markdown(markdown: str) -> None:
         buffer.flush()
     else:
         sys.stdout.write(output)
+
+
+def open_html_report(path: Path) -> None:
+    try:
+        webbrowser.open(path.resolve().as_uri())
+    except Exception:
+        if os.name == "nt":
+            os.startfile(str(path.resolve()))  # type: ignore[attr-defined]
+        else:
+            raise
 
 
 def run_last30days_passthrough(last30days_dir: Path, args: list[str]) -> int:
@@ -986,23 +1002,80 @@ def md_text(value: Any) -> str:
 
 def render_html(payload: dict[str, Any]) -> str:
     data = json.dumps(payload, ensure_ascii=False)
+    themes = payload.get("themes", [])
+    source_counts = payload.get("source_counts", {})
+    direction_counts = Counter(theme.get("direction", "unknown") for theme in themes)
+    total_evidence = sum(int(theme.get("evidence_count", 0)) for theme in themes)
+    max_source_count = max([1, *[int(value) for value in source_counts.values()]])
+    max_window_count = max(
+        [1, *[int(value) for theme in themes for value in theme.get("windows", {}).values()]]
+    )
+
+    source_bars = "".join(
+        f"""
+        <div class="bar-row">
+          <span>{escape(source)}</span>
+          <div class="bar-track"><div class="bar-fill" style="width:{(count / max_source_count) * 100:.1f}%"></div></div>
+          <strong>{count}</strong>
+        </div>
+        """
+        for source, count in sorted(source_counts.items(), key=lambda item: item[1], reverse=True)
+    )
+
+    direction_chips = "".join(
+        f"<span class=\"chip {escape(direction)}\">{escape(direction)} {count}</span>"
+        for direction, count in sorted(direction_counts.items())
+    )
+
     cards = []
-    for theme in payload["themes"]:
+    for index, theme in enumerate(themes, start=1):
+        windows = theme.get("windows", {})
+        timeline = "".join(
+            f"""
+            <div class="tick" title="{escape(label)}: {count}">
+              <div class="tick-bar" style="height:{max(8, (int(count) / max_window_count) * 72):.1f}px"></div>
+            </div>
+            """
+            for label, count in windows.items()
+        )
         evidence = "".join(
-            f"<li><strong>{escape(item['source'])}</strong> {escape(item['published_at'])}: "
-            f"<a href=\"{escape(item['url'])}\">{escape(item['title'])}</a></li>"
-            for item in theme["evidence"]
+            f"""
+            <li>
+              <div class="evidence-meta">{escape(item.get('published_at') or 'unknown date')} · {escape(item.get('source') or 'source')}</div>
+              <a href="{escape(item.get('url') or '#')}" target="_blank" rel="noreferrer">{escape(md_text(item.get('title') or 'Untitled evidence'))}</a>
+              <p>{escape(md_text(item.get('snippet') or ''))}</p>
+            </li>
+            """
+            for item in theme.get("evidence", [])
         )
         cards.append(
-            f"<article class=\"card {escape(theme['direction'])}\">"
-            f"<span>{escape(theme['direction'])}</span>"
-            f"<h2>{escape(theme['title'])}</h2>"
-            f"<p>Momentum {theme['momentum']} · diversity {theme['source_diversity']} · "
-            f"current {theme['current_count']} · baseline {theme['baseline_count']}</p>"
-            f"<pre>{escape(json.dumps(theme['windows'], indent=2))}</pre>"
-            f"<ul>{evidence}</ul>"
-            "</article>"
+            f"""
+            <article class="theme-card {escape(theme.get('direction', 'stable'))}">
+              <div class="theme-rank">{index}</div>
+              <div class="theme-body">
+                <div class="theme-topline">
+                  <span class="chip {escape(theme.get('direction', 'stable'))}">{escape(theme.get('direction', 'stable'))}</span>
+                  <span class="muted">momentum {theme.get('momentum', 0)} · evidence {theme.get('evidence_count', 0)} · diversity {theme.get('source_diversity', 0)}</span>
+                </div>
+                <h2>{escape(md_text(theme.get('title') or 'Untitled trend'))}</h2>
+                <div class="movement">
+                  <div><strong>{theme.get('baseline_count', 0)}</strong><span>baseline</span></div>
+                  <div class="arrow">→</div>
+                  <div><strong>{theme.get('current_count', 0)}</strong><span>recent/current</span></div>
+                </div>
+                <div class="timeline" aria-label="timeline">{timeline}</div>
+                <details>
+                  <summary>Original evidence</summary>
+                  <ul class="evidence-list">{evidence}</ul>
+                </details>
+              </div>
+            </article>
+            """
         )
+
+    coverage_notes = "".join(
+        f"<li>{escape(note)}</li>" for note in payload.get("coverage_notes", [])
+    )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1010,24 +1083,77 @@ def render_html(payload: dict[str, Any]) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Trender - {escape(payload['topic'])}</title>
 <style>
-body {{ margin: 0; background: #0b1020; color: #eef2ff; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }}
-main {{ max-width: 1120px; margin: 0 auto; padding: 32px; }}
-.hero, .card {{ background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.12); border-radius: 18px; padding: 22px; margin: 16px 0; }}
-.grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 16px; }}
-.card span {{ display: inline-block; padding: 4px 10px; border-radius: 999px; background: #1d4ed8; }}
-.emerging span {{ background: #15803d; }} .rising span {{ background: #1d4ed8; }} .fading span {{ background: #991b1b; }} .stable span {{ background: #52525b; }}
-a {{ color: #93c5fd; }} pre {{ white-space: pre-wrap; color: #cbd5e1; }}
+* {{ box-sizing: border-box; }}
+body {{ margin: 0; background: radial-gradient(circle at top left, #172554, #08111f 45%, #050816); color: #eef2ff; font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; }}
+main {{ max-width: 1180px; margin: 0 auto; padding: 32px; }}
+.hero {{ border: 1px solid rgba(148,163,184,.25); background: linear-gradient(135deg, rgba(59,130,246,.22), rgba(15,23,42,.86)); border-radius: 28px; padding: 30px; box-shadow: 0 24px 80px rgba(0,0,0,.35); }}
+.eyebrow {{ color: #67e8f9; font-size: 12px; font-weight: 800; letter-spacing: .22em; text-transform: uppercase; }}
+h1 {{ margin: 8px 0 10px; font-size: clamp(34px, 6vw, 64px); line-height: .95; }}
+.subtitle, .muted {{ color: #a8b3cf; }}
+.metrics {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-top: 24px; }}
+.metric {{ background: rgba(15,23,42,.72); border: 1px solid rgba(148,163,184,.2); border-radius: 18px; padding: 16px; }}
+.metric strong {{ display: block; font-size: 30px; }}
+.metric span {{ color: #a8b3cf; font-size: 13px; }}
+.layout {{ display: grid; grid-template-columns: 340px 1fr; gap: 18px; margin-top: 18px; align-items: start; }}
+.panel, .theme-card {{ background: rgba(15,23,42,.78); border: 1px solid rgba(148,163,184,.18); border-radius: 22px; box-shadow: 0 18px 60px rgba(0,0,0,.24); }}
+.panel {{ padding: 18px; }}
+.panel h2 {{ margin: 0 0 14px; font-size: 16px; }}
+.bar-row {{ display: grid; grid-template-columns: 86px 1fr 32px; gap: 10px; align-items: center; margin: 10px 0; font-size: 13px; }}
+.bar-track {{ height: 10px; border-radius: 999px; background: rgba(148,163,184,.18); overflow: hidden; }}
+.bar-fill {{ height: 100%; border-radius: inherit; background: linear-gradient(90deg, #22d3ee, #a78bfa); }}
+.chips {{ display: flex; flex-wrap: wrap; gap: 8px; }}
+.chip {{ display: inline-flex; align-items: center; border-radius: 999px; padding: 5px 10px; font-size: 12px; font-weight: 800; background: #334155; color: #e2e8f0; text-transform: uppercase; letter-spacing: .04em; }}
+.chip.emerging {{ background: #14532d; color: #bbf7d0; }} .chip.rising {{ background: #1e3a8a; color: #bfdbfe; }} .chip.fading {{ background: #7f1d1d; color: #fecaca; }} .chip.stable {{ background: #3f3f46; color: #e4e4e7; }}
+.notes {{ color: #fef3c7; padding-left: 20px; }}
+.theme-list {{ display: grid; gap: 14px; }}
+.theme-card {{ display: grid; grid-template-columns: 54px 1fr; padding: 0; overflow: hidden; }}
+.theme-rank {{ display: grid; place-items: start center; padding-top: 20px; font-size: 24px; font-weight: 900; color: rgba(255,255,255,.28); background: rgba(255,255,255,.04); }}
+.theme-body {{ padding: 18px; }}
+.theme-topline {{ display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }}
+.theme-card h2 {{ margin: 12px 0; font-size: 22px; line-height: 1.18; }}
+.movement {{ display: inline-grid; grid-template-columns: auto 28px auto; align-items: center; gap: 10px; margin: 4px 0 14px; }}
+.movement div:not(.arrow) {{ background: rgba(255,255,255,.06); border-radius: 14px; padding: 9px 12px; }}
+.movement strong {{ display: block; font-size: 22px; }}
+.movement span {{ color: #a8b3cf; font-size: 12px; }}
+.arrow {{ color: #67e8f9; font-weight: 900; }}
+.timeline {{ display: flex; align-items: end; gap: 3px; min-height: 86px; padding: 10px; border-radius: 16px; background: rgba(2,6,23,.55); border: 1px solid rgba(148,163,184,.14); overflow-x: auto; }}
+.tick {{ min-width: 10px; display: flex; align-items: end; justify-content: center; }}
+.tick-bar {{ width: 8px; min-height: 8px; border-radius: 999px 999px 2px 2px; background: linear-gradient(180deg, #67e8f9, #2563eb); }}
+details {{ margin-top: 12px; }}
+summary {{ cursor: pointer; color: #93c5fd; font-weight: 700; }}
+.evidence-list {{ padding-left: 18px; }}
+.evidence-list li {{ margin: 12px 0; }}
+.evidence-meta {{ color: #94a3b8; font-size: 12px; margin-bottom: 3px; }}
+.evidence-list p {{ color: #a8b3cf; margin: 4px 0 0; }}
+a {{ color: #93c5fd; }}
+@media (max-width: 900px) {{ main {{ padding: 18px; }} .metrics, .layout {{ grid-template-columns: 1fr; }} .theme-card {{ grid-template-columns: 42px 1fr; }} }}
 </style>
 </head>
 <body>
 <main>
 <section class="hero">
-<h1>Trend map: {escape(payload['topic'])}</h1>
-<p>Generated {escape(payload['generated_at'])}</p>
-<p>Window {escape(payload['window']['start'])} to {escape(payload['window']['end'])}; retrieval lookback {payload['retrieval_days']} days.</p>
+<div class="eyebrow">Trender v{VERSION}</div>
+<h1>{escape(md_text(payload['topic']))}</h1>
+<p class="subtitle">Generated {escape(payload['generated_at'])}. Window {escape(payload['window']['start'])} to {escape(payload['window']['end'])}; retrieval lookback {payload['retrieval_days']} days.</p>
+<div class="metrics">
+  <div class="metric"><strong>{payload['source_count']}</strong><span>source items</span></div>
+  <div class="metric"><strong>{len(themes)}</strong><span>trend themes</span></div>
+  <div class="metric"><strong>{total_evidence}</strong><span>theme evidence links</span></div>
+  <div class="metric"><strong>{len(source_counts)}</strong><span>active sources</span></div>
+</div>
 </section>
-<section class="grid">
-{''.join(cards)}
+<section class="layout">
+  <aside class="panel">
+    <h2>Source coverage</h2>
+    {source_bars or '<p class="muted">No source evidence returned.</p>'}
+    <h2 style="margin-top:22px">Directions</h2>
+    <div class="chips">{direction_chips or '<span class="chip">none</span>'}</div>
+    <h2 style="margin-top:22px">Coverage notes</h2>
+    <ul class="notes">{coverage_notes or '<li>No coverage warnings.</li>'}</ul>
+  </aside>
+  <section class="theme-list">
+    {''.join(cards) or '<article class="theme-card"><div class="theme-rank">0</div><div class="theme-body"><h2>No trend themes found</h2><p class="muted">Try a broader query or configure more last30days providers.</p></div></article>'}
+  </section>
 </section>
 </main>
 <script type="application/json" id="trender-data">{escape(data)}</script>
