@@ -24,7 +24,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.1.4"
+VERSION = "0.1.6"
 
 
 @dataclass(frozen=True)
@@ -503,8 +503,91 @@ def analyze_trends(
             )
 
     themes = [theme for theme in themes if theme.score > 0]
+    themes = consolidate_themes(topic, themes, all_windows, bool(compare_windows))
     themes.sort(key=lambda theme: (direction_rank(theme.direction), theme.momentum, theme.score), reverse=True)
     return themes[:12]
+
+
+def consolidate_themes(
+    topic: str,
+    themes: list[TrendTheme],
+    windows: list[Window],
+    compare_mode: bool,
+) -> list[TrendTheme]:
+    grouped: dict[str, list[EvidenceItem]] = defaultdict(list)
+    passthrough: list[TrendTheme] = []
+    seen_by_group: dict[str, set[str]] = defaultdict(set)
+
+    for theme in themes:
+        group = classify_theme_group(topic, theme)
+        if not group:
+            passthrough.append(theme)
+            continue
+        for item in theme.evidence:
+            if item.id in seen_by_group[group]:
+                continue
+            grouped[group].append(item)
+            seen_by_group[group].add(item.id)
+
+    consolidated = [
+        theme_from_items(group, items, windows, topic=topic, compare_mode=compare_mode)
+        for group, items in grouped.items()
+        if items
+    ]
+    return [theme for theme in consolidated if theme.score > 0] + passthrough
+
+
+def classify_theme_group(topic: str, theme: TrendTheme) -> str:
+    text = " ".join(
+        [
+            topic,
+            theme.title,
+            *[item.title for item in theme.evidence],
+            *[item.body[:500] for item in theme.evidence],
+        ]
+    ).lower()
+
+    if any(term in text for term in ["memory", "longmem", "context graph", "context", "postgresql"]):
+        return "Memory and context systems are becoming the substrate for agent learning"
+    if any(
+        term in text
+        for term in [
+            "harness",
+            "eval",
+            "evaluation",
+            "trace",
+            "traces",
+            "feedback",
+            "continual",
+            "online adaptation",
+            "weight update",
+            "weight updates",
+        ]
+    ):
+        return "Feedback harnesses and evaluation loops are turning self-improvement into an engineering pattern"
+    if any(term in text for term in ["tax", "poker", "domain", "case study", "analysis"]):
+        return "Domain-specific agents are the clearest near-term self-improvement testbeds"
+    if any(
+        term in text
+        for term in [
+            "open source",
+            "open-source",
+            "show hn",
+            "github",
+            "framework",
+            "langgraph",
+            "recursi",
+            "airlock",
+            "sia",
+            "hyperagents",
+            "hyperflow",
+            "meta-agent",
+        ]
+    ):
+        return "Open-source implementations are moving self-improving agents from concept to artifacts"
+    if any(term in text for term in ["paper", "research", "foundation agent", "benchmark"]):
+        return "Research and benchmarks are starting to formalize self-improving agent claims"
+    return "General self-improving agent discussion remains fragmented"
 
 
 def theme_from_items(
@@ -806,6 +889,7 @@ def serialize_theme(theme: TrendTheme) -> dict[str, Any]:
         "current_count": theme.current_count,
         "baseline_count": theme.baseline_count,
         "source_diversity": theme.source_diversity,
+        "evidence_count": len(theme.evidence),
         "score": theme.score,
         "windows": theme.windows,
         "sources": theme.sources,
@@ -825,13 +909,13 @@ def serialize_theme(theme: TrendTheme) -> dict[str, Any]:
 
 def render_markdown(payload: dict[str, Any], html_path: Path | None = None, json_path: Path | None = None) -> str:
     lines = [
-        f"📈 trender v{VERSION} · analyzed {payload['generated_at'][:10]}",
+        f"trender v{VERSION} - analyzed {payload['generated_at'][:10]}",
         "",
-        f"What moved for **{payload['topic']}**:",
+        f"What moved for **{md_text(payload['topic'])}**:",
         "",
         (
-            f"Window: {payload['window']['start']} to {payload['window']['end']} · "
-            f"retrieval lookback: {payload['retrieval_days']} days · "
+            f"Window: {payload['window']['start']} to {payload['window']['end']} - "
+            f"retrieval lookback: {payload['retrieval_days']} days - "
             f"sources: {payload['source_count']}"
         ),
         "",
@@ -845,14 +929,20 @@ def render_markdown(payload: dict[str, Any], html_path: Path | None = None, json
     else:
         for index, theme in enumerate(payload["themes"][:8], start=1):
             lines.append(
-                f"{index}. **{theme['title']}** - {theme['direction']} "
-                f"(momentum {theme['momentum']}, diversity {theme['source_diversity']})"
+                f"{index}. **{md_text(theme['title'])}** - {theme['direction']} "
+                f"(momentum {theme['momentum']}, evidence {theme['evidence_count']}, diversity {theme['source_diversity']})"
             )
+            if theme["current_count"] or theme["baseline_count"]:
+                lines.append(
+                    f"   - Signal moved from {theme['baseline_count']} baseline item(s) to "
+                    f"{theme['current_count']} recent/current item(s)."
+                )
             evidence = theme["evidence"][:2]
             for item in evidence:
                 link = f" - {item['url']}" if item["url"] else ""
                 date_part = f"{item['published_at']} · " if item["published_at"] else ""
-                lines.append(f"   - {date_part}{item['source']}: {item['title']}{link}")
+                date_part = f"{item['published_at']} - " if item["published_at"] else ""
+                lines.append(f"   - {date_part}{item['source']}: {md_text(item['title'])}{link}")
             lines.append("")
 
     source_counts = payload.get("source_counts", {})
@@ -865,6 +955,21 @@ def render_markdown(payload: dict[str, Any], html_path: Path | None = None, json
     if json_path:
         lines.append(f"JSON data: {json_path}")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def md_text(value: Any) -> str:
+    return (
+        str(value)
+        .replace("—", "-")
+        .replace("–", "-")
+        .replace("·", "-")
+        .replace("“", '"')
+        .replace("”", '"')
+        .replace("’", "'")
+        .replace("‘", "'")
+        .replace("☀️", "")
+        .replace("☀", "")
+    )
 
 
 def render_html(payload: dict[str, Any]) -> str:
