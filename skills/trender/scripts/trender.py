@@ -25,7 +25,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.2.1"
+VERSION = "0.3.1"
 
 
 @dataclass(frozen=True)
@@ -378,7 +378,7 @@ def build_trender_plan(topic: str) -> dict[str, Any]:
         },
         {
             "label": "adjacent-phrasing",
-            "search_query": f"{core} self improving autonomous agents learning from feedback memory reflection",
+            "search_query": f"{core} trends emerging patterns adoption examples",
             "ranking_query": f"What adjacent terminology or related phrases point to the same trend as {core}?",
             "sources": sources,
             "weight": 0.85,
@@ -566,55 +566,20 @@ def consolidate_themes(
 
 
 def classify_theme_group(topic: str, theme: TrendTheme) -> str:
-    text = " ".join(
-        [
-            theme.title,
-            *[item.title for item in theme.evidence],
-            *[item.body[:500] for item in theme.evidence],
-        ]
-    ).lower()
-
-    if any(term in text for term in ["memory", "longmem", "context graph", "context", "postgresql"]):
-        return "Memory and context systems are becoming the substrate for agent learning"
-    if any(
-        term in text
-        for term in [
-            "harness",
-            "eval",
-            "evaluation",
-            "trace",
-            "traces",
-            "feedback",
-            "continual",
-            "online adaptation",
-            "weight update",
-            "weight updates",
-        ]
-    ):
-        return "Feedback harnesses and evaluation loops are turning self-improvement into an engineering pattern"
-    if any(term in text for term in ["tax", "poker", "domain", "case study", "analysis"]):
-        return "Domain-specific agents are the clearest near-term self-improvement testbeds"
-    if any(
-        term in text
-        for term in [
-            "open source",
-            "open-source",
-            "show hn",
-            "github",
-            "framework",
-            "langgraph",
-            "recursi",
-            "airlock",
-            "sia",
-            "hyperagents",
-            "hyperflow",
-            "meta-agent",
-        ]
-    ):
-        return "Open-source implementations are moving self-improving agents from concept to artifacts"
-    if any(term in text for term in ["paper", "research", "foundation agent", "benchmark"]):
-        return "Research and benchmarks are starting to formalize self-improving agent claims"
-    return "General self-improving agent discussion remains fragmented"
+    text = " ".join([theme.title, *[item.title for item in theme.evidence], *[item.body[:500] for item in theme.evidence]]).lower()
+    topic_label = md_text(topic).strip()
+    if any(term in text for term in ["bug", "issue", "limit", "limitation", "regression", "broken", "fail", "error", "complaint", "pricing", "quota", "cost"]):
+        return f"{topic_label}: problems, limits, and adoption friction"
+    if any(term in text for term in ["paper", "arxiv", "research", "benchmark", "evaluation", "eval", "study", "analysis", "case study"]):
+        return f"{topic_label}: research, benchmarks, and evaluation"
+    if any(term in text for term in ["github", "repo", "release", "open source", "open-source", "implementation", "framework", "tool", "library", "show hn", "demo", "launch"]):
+        return f"{topic_label}: implementations, releases, and demos"
+    if any(term in text for term in ["workflow", "workflows", "use case", "use cases", "adoption", "production", "teams", "users", "customer", "enterprise"]):
+        return f"{topic_label}: workflows, use cases, and adoption"
+    if any(term in text for term in ["news", "report", "funding", "market", "polymarket", "odds", "acquisition", "announces"]):
+        return f"{topic_label}: news, market, and external signals"
+    compact = re.sub(r"\s+", " ", md_text(theme.title)).strip()
+    return compact[:96] or f"{topic_label}: uncategorized evidence"
 
 
 def theme_from_items(
@@ -626,7 +591,8 @@ def theme_from_items(
     compare_mode: bool,
 ) -> TrendTheme:
     relevance = theme_relevance(topic, title, items)
-    if relevance < 0.34:
+    min_relevance = 0.5 if len(topic_tokens(topic)) >= 2 else 0.34
+    if relevance < min_relevance:
         return TrendTheme(
             title=title,
             direction="filtered",
@@ -772,20 +738,13 @@ def theme_relevance(topic: str, title: str, items: list[EvidenceItem]) -> float:
     tokens = topic_tokens(topic)
     if not tokens:
         return 1.0
-    matched = sum(1 for token in tokens if token in text)
+    text_tokens = set(topic_tokens(text))
+    matched = sum(1 for token in tokens if token in text_tokens)
     score = matched / len(tokens)
     if normalized_topic and normalized_topic in text:
         score += 0.6
-    if "self" in tokens and any(term in text for term in ["self improving", "self-improving", "self learning", "self-learning"]):
-        score += 0.4
-    if any(token in tokens for token in ["agent", "agents", "agentic"]) and any(
-        term in text for term in ["agent", "agents", "agentic", "autonomous"]
-    ):
-        score += 0.2
-    if any(term in text for term in ["feedback", "reflection", "memory", "learning", "improving", "self-upgrading"]):
-        score += 0.15
-    if is_self_improvement_topic(tokens) and not has_strict_self_improvement_signal(item_text):
-        score = min(score, 0.25)
+    if topic_phrase_match(tokens, item_text):
+        score += 0.35
     return min(score, 1.5)
 
 
@@ -794,74 +753,36 @@ def topic_tokens(topic: str) -> list[str]:
     raw = re.findall(r"[a-z0-9][a-z0-9-]{1,}", topic.lower())
     tokens = []
     for token in raw:
-        token = token.rstrip("s")
+        token = normalize_token(token)
         if token and token not in stop and token not in tokens:
             tokens.append(token)
     return tokens
 
 
-def is_self_improvement_topic(tokens: list[str]) -> bool:
-    return "self" in tokens and any(
-        token in tokens for token in ["improving", "improvement", "improv", "learning", "learn"]
-    )
+def normalize_token(token: str) -> str:
+    token = token.lower().strip("-_").rstrip("s")
+    replacements = {
+        "improving": "improv",
+        "improvement": "improv",
+        "improve": "improv",
+        "improved": "improv",
+        "learning": "learn",
+        "learned": "learn",
+        "agents": "agent",
+        "agentic": "agent",
+        "tools": "tool",
+        "servers": "server",
+    }
+    return replacements.get(token, token)
 
 
-def has_self_improvement_signal(text: str) -> bool:
-    return any(
-        term in text
-        for term in [
-            "self improving",
-            "self-improving",
-            "self learning",
-            "self-learning",
-            "self-upgrading",
-            "self upgrading",
-            "improving",
-            "improvement",
-            "learns",
-            "learning",
-            "feedback",
-            "reflection",
-            "reflective",
-            "adaptation",
-            "adapting",
-            "memory",
-        ]
-    )
-
-
-def has_strict_self_improvement_signal(text: str) -> bool:
-    if any(
-        term in text
-        for term in [
-            "self improving",
-            "self-improving",
-            "self learning",
-            "self-learning",
-            "self-upgrading",
-            "self upgrading",
-            "self-verifying",
-            "self verifying",
-            "self-referential",
-            "self referential",
-        ]
-    ):
-        return True
-    return "self" in text and any(
-        term in text
-        for term in [
-            "improving",
-            "improvement",
-            "learns",
-            "learning",
-            "upgrading",
-            "adaptation",
-            "adapting",
-            "reflection",
-            "reflective",
-            "feedback",
-        ]
-    )
+def topic_phrase_match(tokens: list[str], text: str) -> bool:
+    if len(tokens) < 2:
+        return False
+    text_tokens = topic_tokens(text)
+    text_bigrams = set(zip(text_tokens, text_tokens[1:]))
+    query_bigrams = set(zip(tokens, tokens[1:]))
+    return bool(text_bigrams & query_bigrams)
 
 
 def evidence_score(raw: dict[str, Any]) -> float:
