@@ -1,12 +1,18 @@
 # Trender Skill
 
-Trender is a coding-agent skill that reuses broad `last30days`-style research and adds trend analysis over flexible time windows.
+Trender maps how a topic evolves across time. It combines host-agent bucketed web evidence with a bundled `last30days` community layer, then produces theme momentum, inflection moments, vocabulary drift, emerging entities, forward signals, Markdown synthesis, JSON data, and a self-contained HTML trend map.
 
-The skill bundles a compatible `last30days` engine under `vendor/last30days`, so it can retrieve evidence without requiring a separate `last30days` install.
+Current version: **0.6.0**.
 
-For deep web research, use the host coding agent's web/deep-research tools, write findings to JSON, and pass that file with `--agent-web-file`.
+## Requirements
+
+- Python 3.12+ for the bundled `last30days` community layer.
+- Shell access from the host agent.
+- Optional network access and source credentials for richer evidence collection.
 
 ## Install
+
+From this skill directory on Windows:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-skill.ps1 -Agent copilot -Force
@@ -18,30 +24,76 @@ Or from the repository root:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\skills\trender\scripts\install-skill.ps1 -Agent copilot -Force
 ```
 
-Use `-Agent claude` for `~/.claude/skills/trender` or `-Agent codex` for `~/.agents/skills/trender`.
+Use `-Agent claude` for `%USERPROFILE%\.claude\skills\trender` or `-Agent codex` for `%USERPROFILE%\.agents\skills\trender`.
+
+On macOS/Linux:
+
+```bash
+bash ./scripts/install-skill.sh --agent copilot
+bash ./scripts/install-skill.sh --agent claude
+bash ./scripts/install-skill.sh --agent codex
+```
+
+## Configure sources
+
+Run diagnostics:
+
+```bash
+python3 scripts/trender.py --diagnose
+```
+
+Run setup once to let the bundled `last30days` engine discover browser cookies and write its local environment file:
+
+```bash
+python3 scripts/trender.py setup
+```
+
+Set `LAST30DAYS_SKILL_DIR` only if you want to override the bundled engine with another checkout.
+
+## Host-agent evidence
+
+For best results, the host coding agent should gather **bucketed** web evidence before running Trender and pass it with `--agent-web-file`.
+
+```json
+{
+  "buckets": {
+    "research": [
+      {
+        "title": "...",
+        "url": "https://...",
+        "published_at": "YYYY-MM-DD",
+        "summary": "...",
+        "source": "arxiv",
+        "relevance_score": 0.9
+      }
+    ],
+    "implementations": [],
+    "adoption": [],
+    "criticism": [],
+    "forecasts": []
+  }
+}
+```
+
+See `SKILL.md` Step 0 for the full evidence contract. Without `--agent-web-file`, Trender falls back to community signal only and the report will say so.
 
 ## Examples
 
 ```bash
-python3 scripts/trender.py --diagnose
-python3 scripts/trender.py setup
-
-# Default: compare last 30 days vs prior 5 months
+# Default: compare last 30 days vs prior 5 months.
 python3 scripts/trender.py "agentic AI" --agent-web-file ./agent-web.json
 
-# Explicit comparison windows
-python3 scripts/trender.py "agentic AI" --compare=7,30  --agent-web-file ./agent-web.json
+# Explicit comparison windows.
+python3 scripts/trender.py "agentic AI" --compare=7,30 --agent-web-file ./agent-web.json
+python3 scripts/trender.py "MCP servers" --compare=30,180 --emit=all
+
+# Explicit date range.
 python3 scripts/trender.py "MCP servers" --from=2026-01-01 --to=2026-06-01 --emit=all
 
-# Network-free smoke test
+# Network-free smoke test.
 python3 scripts/trender.py "MCP servers" --mock --emit=all --no-open
 ```
 
 HTML is the default output and opens automatically. Pass `--no-open` to only write the file.
 
-The host coding agent is expected to gather **bucketed** web evidence (research / implementations / adoption / criticism / forecasts) and pass it via `--agent-web-file`. See `SKILL.md` Step 0 for the JSON schema. Without it, Trender falls back to community signal only and the report will say so.
-
-Run `setup` once to let the bundled `last30days` engine discover browser cookies and write `~/.config/last30days/.env`. Run `--diagnose` to see which sources are currently available.
-
-Set `LAST30DAYS_SKILL_DIR` only if you want to override the bundled engine with another checkout.
-
+By default, reports are written to `~/Documents/Trender`. Pass `--save-dir` or set `TRENDER_OUTPUT_DIR` to change the destination.
