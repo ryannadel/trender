@@ -2,13 +2,15 @@
 
 Trender maps how a topic evolves across time. It combines host-agent bucketed web evidence with a bundled `last30days` community layer, then produces theme momentum, inflection moments, vocabulary drift, emerging entities, forward signals, Markdown synthesis, JSON data, and a self-contained HTML trend map.
 
-Current version: **0.6.0**.
+Current version: **0.7.0**.
 
 ## Requirements
 
 - Python 3.12+ for the bundled `last30days` community layer.
 - Shell access from the host agent.
 - Optional network access and source credentials for richer evidence collection.
+
+The host coding agent also authors the **bottom-line-up-front (BLUF)** summary — a few scannable bullets that lead the report — and an optional forward outlook, handing them to Trender via `--narrative-file`. If omitted, Trender renders a clearly-labeled auto-generated fallback derived from the strongest computed signals.
 
 ## Install
 
@@ -82,6 +84,9 @@ See `SKILL.md` Step 0 for the full evidence contract. Without `--agent-web-file`
 ```bash
 # Default: compare last 30 days vs prior 5 months.
 python3 scripts/trender.py "agentic AI" --agent-web-file ./agent-web.json
+
+# With an agent-authored bottom line + forward outlook.
+python3 scripts/trender.py "agentic AI" --agent-web-file ./agent-web.json --narrative-file ./narrative.json
 
 # Explicit comparison windows.
 python3 scripts/trender.py "agentic AI" --compare=7,30 --agent-web-file ./agent-web.json

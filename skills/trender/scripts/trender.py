@@ -36,7 +36,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 
 
 @dataclass(frozen=True)
@@ -159,6 +159,8 @@ def main() -> int:
     evidence.extend(agent_items)
     evidence = dedupe_evidence(evidence)
 
+    narrative = load_agent_narrative(args.narrative_file)
+
     overall_start = min([w.start for w in compare_windows] + [primary_window.start])
     overall_end = primary_window.end
     in_scope = [
@@ -193,10 +195,18 @@ def main() -> int:
         "emerging_entities": emerging_entities,
         "vocabulary_drift": vocab_drift,
         "inflection_moments": [serialize_inflection(m) for m in inflections],
-        "forward_signals": [serialize_evidence(e) for e in forward[:12]],
+        "forward_signals": [serialize_forward_signal(e) for e in forward[:12]],
         "coverage_notes": coverage_notes(in_scope, bool(args.agent_web_file)),
         "last30days_dir": str(last30days_dir),
     }
+
+    bluf = narrative["bluf"]
+    bluf_authored = narrative["authored"]
+    if not bluf:
+        bluf = build_bluf_fallback(payload)
+    payload["bluf"] = bluf
+    payload["bluf_authored"] = bluf_authored
+    payload["forward_outlook"] = narrative["forward_outlook"]
 
     save_dir = Path(args.save_dir).expanduser()
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -241,6 +251,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--deep", action="store_true")
     parser.add_argument("--mock", action="store_true")
     parser.add_argument("--agent-web-file", default=os.getenv("TRENDER_AGENT_WEB_FILE"))
+    parser.add_argument("--narrative-file", default=os.getenv("TRENDER_NARRATIVE_FILE"),
+                        help="JSON/Markdown authored by the host agent: bottom-line bullets (bluf) + forward_outlook.")
     parser.add_argument("--diagnose", action="store_true")
     parser.add_argument("--no-open", action="store_true")
     parser.add_argument("--skip-last30days-preflight", action="store_true")
@@ -897,6 +909,32 @@ _FORWARD_MARKERS = re.compile(
     r"\b(will|by 20\d{2}|expects?|predicts?|forecast(?:s|ed)?|roadmap|rfc|projection|likely to|set to|plans? to)\b",
     re.IGNORECASE,
 )
+_ROADMAP_MARKERS = re.compile(r"\b(roadmap|rfc|milestone|planned|plans? to|ga\b|general availability|release plan)\b", re.IGNORECASE)
+_FORECAST_MARKERS = re.compile(r"\b(forecast(?:s|ed)?|projection|projected|estimat\w*|expects?|analyst|outlook)\b", re.IGNORECASE)
+_HORIZON_YEAR = re.compile(r"\b(20[2-9]\d)\b")
+
+
+def classify_forward_signal(item: EvidenceItem) -> str:
+    """Bucket a forward signal into a scannable category."""
+    if item.source.lower() == "polymarket":
+        return "betting market"
+    text = item.text
+    if _ROADMAP_MARKERS.search(text):
+        return "roadmap"
+    if _FORECAST_MARKERS.search(text):
+        return "forecast"
+    return "prediction"
+
+
+def forward_horizon(item: EvidenceItem) -> str:
+    """Extract the furthest future year referenced, if any (e.g. 'by 2027')."""
+    years = _HORIZON_YEAR.findall(item.text)
+    if not years:
+        return ""
+    current_year = date.today().year
+    future = [y for y in years if int(y) >= current_year]
+    pool = future or years
+    return max(pool, key=int)
 
 
 def collect_forward_signals(items: list[EvidenceItem]) -> list[EvidenceItem]:
@@ -909,6 +947,15 @@ def collect_forward_signals(items: list[EvidenceItem]) -> list[EvidenceItem]:
             out.append(e)
     out.sort(key=lambda e: (e.published_at or date.min, e.score), reverse=True)
     return out
+
+
+def serialize_forward_signal(item: EvidenceItem | None) -> dict[str, Any] | None:
+    base = serialize_evidence(item)
+    if base is None or item is None:
+        return None
+    base["kind"] = classify_forward_signal(item)
+    base["horizon"] = forward_horizon(item)
+    return base
 
 
 def serialize_window(w: Window) -> dict[str, str]:
@@ -970,6 +1017,127 @@ def coverage_notes(items: list[EvidenceItem], had_agent_web: bool) -> list[str]:
     return notes
 
 
+def load_agent_narrative(path: str | None) -> dict[str, Any]:
+    """Load host-agent-authored narrative (BLUF bullets + forward outlook).
+
+    The host coding agent authors the bottom-line synthesis the same way it
+    authors the rest of the analysis, and hands it to Trender via a JSON file:
+
+        {"bluf": ["bullet", {"text": "bullet", "url": "https://..."}],
+         "forward_outlook": "one-line what's-coming takeaway"}
+
+    A plain Markdown bullet list (``bluf_md``) or a ``.md`` file is also accepted.
+    Returns a normalized dict: {"bluf": [{"text","url"}], "forward_outlook": str,
+    "authored": bool}.
+    """
+    empty = {"bluf": [], "forward_outlook": "", "authored": False}
+    if not path:
+        return empty
+    p = Path(path).expanduser()
+    if not p.exists():
+        raise SystemExit(f"--narrative-file does not exist: {p}")
+    raw_text = p.read_text(encoding="utf-8").strip()
+    if not raw_text:
+        return empty
+
+    bluf_items: list[Any] = []
+    forward_outlook = ""
+    if p.suffix.lower() in (".md", ".markdown") or not raw_text.startswith(("{", "[")):
+        bluf_items = _bullets_from_markdown(raw_text)
+    else:
+        data = json.loads(raw_text)
+        if isinstance(data, list):
+            bluf_items = data
+        elif isinstance(data, dict):
+            if isinstance(data.get("bluf"), list):
+                bluf_items = data["bluf"]
+            elif isinstance(data.get("bluf_md"), str):
+                bluf_items = _bullets_from_markdown(data["bluf_md"])
+            forward_outlook = str(data.get("forward_outlook") or "").strip()
+        else:
+            raise SystemExit("--narrative-file JSON must be an object or array.")
+
+    bluf = normalize_bluf(bluf_items)
+    return {
+        "bluf": bluf,
+        "forward_outlook": forward_outlook,
+        "authored": bool(bluf or forward_outlook),
+    }
+
+
+def _bullets_from_markdown(text: str) -> list[str]:
+    bullets: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        stripped = re.sub(r"^[-*+]\s+", "", stripped)
+        stripped = re.sub(r"^\d+[.)]\s+", "", stripped)
+        if stripped:
+            bullets.append(stripped)
+    return bullets
+
+
+def normalize_bluf(items: list[Any]) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    for it in items:
+        if isinstance(it, str):
+            text = it.strip()
+            if text:
+                out.append({"text": text, "url": ""})
+        elif isinstance(it, dict):
+            text = str(it.get("text") or it.get("bullet") or "").strip()
+            if text:
+                out.append({"text": text, "url": str(it.get("url") or "").strip()})
+    return out
+
+
+def build_bluf_fallback(payload: dict[str, Any]) -> list[dict[str, str]]:
+    """Derive a minimal, clearly-labeled BLUF when the agent supplied none.
+
+    These are deterministic data-derived highlights — never presented as the
+    agent's synthesis. The HTML/Markdown flag them as auto-generated.
+    """
+    bullets: list[dict[str, str]] = []
+    by_dir: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for t in payload.get("themes", []):
+        by_dir[t.get("direction", "stable")].append(t)
+
+    for direction, verb in (("emerging", "emerging"), ("rising", "accelerating")):
+        ranked = sorted(by_dir.get(direction, []), key=lambda t: t.get("score", 0), reverse=True)
+        if ranked:
+            top = ranked[0]
+            bullets.append({
+                "text": f"Strongest {verb} theme: \u201c{top['title']}\u201d "
+                        f"({top.get('current_count', 0)} items, momentum {top.get('momentum', 0)}).",
+                "url": (top.get("now") or {}).get("url", "") if top.get("now") else "",
+            })
+
+    inflections = payload.get("inflection_moments", [])
+    if inflections:
+        m = max(inflections, key=lambda x: x.get("lift", 0))
+        head = m.get("headline") or {}
+        bullets.append({
+            "text": f"Biggest volume jump: {m['start']}\u2192{m['end']} "
+                    f"(+{int(m.get('lift', 0) * 100)}%)"
+                    + (f" \u2014 {head.get('title', '')}" if head.get("title") else "") + ".",
+            "url": head.get("url", ""),
+        })
+
+    entities = payload.get("emerging_entities", [])
+    if entities:
+        names = ", ".join(e["entity"] for e in entities[:3])
+        bullets.append({"text": f"New names entering the conversation: {names}.", "url": ""})
+
+    forward = [f for f in payload.get("forward_signals", []) if f]
+    if forward:
+        top = forward[0]
+        bullets.append({
+            "text": f"Forward signal to watch ({top.get('kind', 'prediction')}): {top.get('title', '')}.",
+            "url": top.get("url", ""),
+        })
+
+    return bullets[:5]
+
+
 def render_markdown(payload: dict[str, Any], *, html_path: Path | None = None,
                      json_path: Path | None = None) -> str:
     lines: list[str] = []
@@ -985,6 +1153,19 @@ def render_markdown(payload: dict[str, Any], *, html_path: Path | None = None,
     if payload["compare_windows"]:
         lines.append("Comparison: " + " vs ".join(c["label"] for c in payload["compare_windows"]))
     lines.append("")
+
+    bluf = payload.get("bluf") or []
+    if bluf:
+        if payload.get("bluf_authored"):
+            lines.append("## Bottom line up front")
+        else:
+            lines.append("## Bottom line up front (auto-generated)")
+        for b in bluf:
+            text = b.get("text", "") if isinstance(b, dict) else str(b)
+            url = b.get("url", "") if isinstance(b, dict) else ""
+            tail = f" ([source]({url}))" if url else ""
+            lines.append(f"- {text}{tail}")
+        lines.append("")
 
     by_dir: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for t in payload["themes"]:
@@ -1036,9 +1217,17 @@ def render_markdown(payload: dict[str, Any], *, html_path: Path | None = None,
 
     if payload.get("forward_signals"):
         lines.append("## Forward signals")
+        if payload.get("forward_outlook"):
+            lines.append(f"_{payload['forward_outlook']}_")
+            lines.append("")
         for sig in payload["forward_signals"][:8]:
             if sig and sig.get("url"):
-                lines.append(f"- {sig.get('published_at', '')} - {sig['source']}: [{sig['title']}]({sig['url']})")
+                kind = sig.get("kind", "prediction")
+                horizon = f" (by {sig['horizon']})" if sig.get("horizon") else ""
+                lines.append(
+                    f"- **[{kind}]**{horizon} {sig.get('published_at', '')} - "
+                    f"{sig['source']}: [{sig['title']}]({sig['url']})"
+                )
         lines.append("")
 
     counts = payload.get("source_counts", {})
@@ -1484,7 +1673,91 @@ table.vocab .lift-bar {{
   .quote-pair {{ grid-template-columns: 1fr; }}
   .nav {{ display: none; }}
   .hero {{ padding: 32px 0 24px; }}
+  .forward-grid {{ grid-template-columns: 1fr; }}
 }}
+
+/* bottom line up front */
+.bluf-block {{ margin-top: 40px; }}
+.bluf {{
+  position: relative;
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  background:
+    linear-gradient(180deg, rgba(103,232,249,.06), rgba(103,232,249,0)) ,
+    var(--bg-card);
+  padding: 22px 24px 18px;
+  box-shadow: var(--shadow);
+}}
+.bluf ul {{ list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }}
+.bluf li {{
+  position: relative; padding-left: 26px;
+  font-size: 16px; line-height: 1.55; color: var(--text);
+}}
+.bluf li::before {{
+  content: ''; position: absolute; left: 4px; top: 9px;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  box-shadow: 0 0 10px rgba(103,232,249,.5);
+}}
+.bluf li a {{ font-weight: 500; }}
+.bluf-src {{ font-size: 12px; margin-left: 6px; }}
+.bluf-auto {{
+  display: inline-flex; align-items: center; gap: 6px;
+  margin-top: 14px; font-size: 11px; letter-spacing: .04em;
+  color: var(--text-muted); text-transform: uppercase;
+}}
+
+/* forward signals */
+.forward-outlook {{
+  margin: 0 0 14px; padding: 12px 16px;
+  border-radius: 10px; font-size: 15px; line-height: 1.5;
+  color: var(--text); background: rgba(96,165,250,.08);
+  border: 1px solid rgba(96,165,250,.22);
+}}
+.forward-summary {{
+  display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px;
+  font-size: 12px; color: var(--text-dim);
+}}
+.forward-summary .fwd-stat {{
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: 999px;
+  background: rgba(148,163,184,.07); border: 1px solid var(--border);
+}}
+.forward-summary .fwd-stat strong {{ color: var(--text); font-variant-numeric: tabular-nums; }}
+.forward-grid {{
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px;
+}}
+.fwd-card {{
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 16px; border-radius: var(--radius);
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-top: 2px solid var(--border-strong);
+  animation: fadein .4s ease both;
+}}
+.fwd-top {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }}
+.fwd-badge {{
+  font-size: 11px; font-weight: 600; letter-spacing: .03em;
+  padding: 3px 9px; border-radius: 999px; text-transform: capitalize;
+  border: 1px solid currentColor;
+}}
+.fwd-badge.k-prediction {{ color: var(--rising); }}
+.fwd-badge.k-forecast {{ color: var(--accent); }}
+.fwd-badge.k-roadmap {{ color: var(--accent-2); }}
+.fwd-badge.k-betting {{ color: var(--emerging); }}
+.fwd-card.k-prediction {{ border-top-color: var(--rising); }}
+.fwd-card.k-forecast {{ border-top-color: var(--accent); }}
+.fwd-card.k-roadmap {{ border-top-color: var(--accent-2); }}
+.fwd-card.k-betting {{ border-top-color: var(--emerging); }}
+.fwd-horizon {{
+  font-size: 11px; font-weight: 600; color: var(--text-dim);
+  padding: 3px 8px; border-radius: 6px;
+  background: rgba(148,163,184,.1); border: 1px solid var(--border);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+}}
+.fwd-meta {{ font-size: 11px; color: var(--text-muted); margin-left: auto; }}
+.fwd-title {{ font-size: 14px; font-weight: 600; line-height: 1.4; }}
+.fwd-snippet {{ font-size: 12px; color: var(--text-dim); margin: 0; line-height: 1.5; }}
 
 /* utility */
 .empty {{ color: var(--text-muted); font-style: italic; padding: 12px 0; }}
@@ -1509,6 +1782,7 @@ table.vocab .lift-bar {{
       <span class="brand-version mono">v{version}</span>
     </div>
     <nav class="nav">
+      <a href="#bluf">Bottom line</a>
       <a href="#inflections">Inflections</a>
       <a href="#themes">Themes</a>
       <a href="#entities">Entities</a>
@@ -1555,6 +1829,14 @@ table.vocab .lift-bar {{
     </div>
   </section>
 
+  <section id="bluf" class="block bluf-block">
+    <div class="block-head">
+      <h2>Bottom line up front</h2>
+      <span class="hint" id="bluf-hint">the few things worth knowing before you scroll</span>
+    </div>
+    <div id="bluf-card" class="bluf"></div>
+  </section>
+
   <section id="inflections" class="block">
     <div class="block-head">
       <h2>Inflection moments</h2>
@@ -1596,7 +1878,9 @@ table.vocab .lift-bar {{
           <h2>Forward signals</h2>
           <span class="hint">predictions, roadmaps, forecasts, betting markets</span>
         </div>
-        <div id="forward-list"></div>
+        <p id="forward-outlook" class="forward-outlook" hidden></p>
+        <div id="forward-summary" class="forward-summary"></div>
+        <div id="forward-list" class="forward-grid"></div>
       </section>
 
     </div>
@@ -1634,6 +1918,29 @@ table.vocab .lift-bar {{
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
   const fmt = (n) => Number.isFinite(n) ? n.toLocaleString() : '0';
+
+  // bottom line up front
+  (function renderBluf() {{
+    const host = document.getElementById('bluf-card');
+    if (!host) return;
+    const bluf = (data.bluf || []).filter(b => b && b.text);
+    const hint = document.getElementById('bluf-hint');
+    if (!bluf.length) {{
+      host.innerHTML = '<p class="empty">No bottom-line summary supplied. Have the host agent author one via --narrative-file.</p>';
+      return;
+    }}
+    const items = bluf.map(b => {{
+      const src = b.url
+        ? ` <a class="bluf-src" href="${{escapeHtml(b.url)}}" target="_blank" rel="noreferrer">source ›</a>`
+        : '';
+      return `<li>${{escapeHtml(b.text)}}${{src}}</li>`;
+    }}).join('');
+    const auto = data.bluf_authored
+      ? ''
+      : '<div class="bluf-auto">⚙ auto-generated from signals — agent did not supply a bottom line</div>';
+    host.innerHTML = `<ul>${{items}}</ul>${{auto}}`;
+    if (hint && !data.bluf_authored) hint.textContent = 'auto-generated highlights · agent BLUF not provided';
+  }})();
 
   // sparkline as SVG area chart
   function sparkline(values) {{
@@ -1832,17 +2139,52 @@ table.vocab .lift-bar {{
 
   // forward signals
   const forwardHost = document.getElementById('forward-list');
+  const forwardSummary = document.getElementById('forward-summary');
+  const outlookEl = document.getElementById('forward-outlook');
   const forward = (data.forward_signals || []).filter(Boolean);
+
+  if (data.forward_outlook && outlookEl) {{
+    outlookEl.textContent = data.forward_outlook;
+    outlookEl.hidden = false;
+  }}
+
+  const KIND_CLASS = {{
+    'betting market': 'k-betting',
+    'roadmap': 'k-roadmap',
+    'forecast': 'k-forecast',
+    'prediction': 'k-prediction',
+  }};
+
   if (!forward.length) {{
     forwardHost.innerHTML = '<p class="empty">No forward signals detected. Populate the forecasts bucket via --agent-web-file.</p>';
   }} else {{
-    forwardHost.innerHTML = '<ul class="notes" style="list-style:none;padding:0">' + forward.slice(0, 10).map(s => `
-      <li style="background:rgba(96,165,250,.06);border-color:rgba(96,165,250,.2);color:var(--text)">
-        <div style="color:var(--text-muted);font-size:11px;margin-bottom:4px">${{escapeHtml(s.published_at || 'unknown')}} · ${{escapeHtml(s.source || '')}}</div>
-        <a href="${{escapeHtml(s.url || '#')}}" target="_blank" rel="noreferrer">${{escapeHtml(s.title || '')}}</a>
-        <p style="color:var(--text-dim);margin:4px 0 0;font-size:12px">${{escapeHtml((s.snippet || '').slice(0, 220))}}</p>
-      </li>
-    `).join('') + '</ul>';
+    const counts = {{}};
+    forward.forEach(s => {{ const k = s.kind || 'prediction'; counts[k] = (counts[k] || 0) + 1; }});
+    const order = ['betting market', 'roadmap', 'forecast', 'prediction'];
+    const stats = order.filter(k => counts[k]).map(k =>
+      `<span class="fwd-stat"><strong>${{counts[k]}}</strong> ${{escapeHtml(k)}}${{counts[k] > 1 ? 's' : ''}}</span>`
+    ).join('');
+    forwardSummary.innerHTML =
+      `<span class="fwd-stat"><strong>${{forward.length}}</strong> signal${{forward.length > 1 ? 's' : ''}}</span>` + stats;
+
+    forwardHost.innerHTML = forward.slice(0, 10).map(s => {{
+      const kind = s.kind || 'prediction';
+      const cls = KIND_CLASS[kind] || 'k-prediction';
+      const horizon = s.horizon
+        ? `<span class="fwd-horizon">by ${{escapeHtml(s.horizon)}}</span>` : '';
+      const meta = `${{escapeHtml(s.published_at || 'undated')}} · ${{escapeHtml(s.source || '')}}`;
+      const snippet = s.snippet
+        ? `<p class="fwd-snippet">${{escapeHtml(s.snippet.slice(0, 200))}}</p>` : '';
+      return `<div class="fwd-card ${{cls}}">
+        <div class="fwd-top">
+          <span class="fwd-badge ${{cls}}">${{escapeHtml(kind)}}</span>
+          ${{horizon}}
+          <span class="fwd-meta">${{meta}}</span>
+        </div>
+        <a class="fwd-title" href="${{escapeHtml(s.url || '#')}}" target="_blank" rel="noreferrer">${{escapeHtml(s.title || '')}}</a>
+        ${{snippet}}
+      </div>`;
+    }}).join('');
   }}
 
   // source bars

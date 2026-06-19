@@ -2,7 +2,7 @@
 
 Trender is an agent-native skill for mapping how a topic changes over time. It combines bucketed web evidence from the host coding agent with a bundled `last30days` community-research layer, then clusters themes, scores momentum, surfaces emerging entities and vocabulary drift, and renders a self-contained HTML trend map.
 
-Current version: **0.6.0**.
+Current version: **0.7.0**.
 
 ## What it does
 
@@ -10,7 +10,7 @@ Current version: **0.6.0**.
 - Uses host-agent web research via `--agent-web-file` for higher-quality evidence.
 - Bundles a compatible `last30days` engine in `skills/trender/vendor/last30days`.
 - Routes community subqueries by intent instead of sending every query to every source.
-- Produces inflection moments, accelerating/fading/stable themes, then-to-now quote pairs, emerging entities, vocabulary drift, forward signals, Markdown synthesis, JSON data, and an HTML report.
+- Produces inflection moments, accelerating/fading/stable themes, then-to-now quote pairs, emerging entities, vocabulary drift, forward signals, an agent-authored BLUF/forward outlook when provided, Markdown synthesis, JSON data, and an HTML report.
 - Opens the HTML report automatically by default.
 
 Trender itself does not call OpenAI, Brave, or similar web APIs directly. For deep web research, the host agent should use its own web/deep-research tools, save evidence to JSON, and pass that file to Trender. Optional credentials can improve the bundled `last30days` sources.
@@ -29,6 +29,12 @@ Useful environment variables:
 | `TRENDER_AGENT_WEB_FILE` | Default `--agent-web-file` path. |
 | `LAST30DAYS_SKILL_DIR` | Override the bundled `last30days` engine. |
 | `TRENDER_LAST30DAYS_PYTHON` | Python executable to use for `last30days` when multiple versions are installed. |
+
+## Agent-authored narrative
+
+The host coding agent can provide a bottom-line-up-front (BLUF) summary and forward outlook with `--narrative-file`. This lets the final report lead with the agent's synthesized takeaways while Trender keeps the evidence-backed trend map, computed signals, and traceable source lists.
+
+If no narrative file is provided, Trender renders a clearly labeled auto-generated fallback based on the strongest computed signals.
 
 ## Repository layout
 
@@ -175,6 +181,9 @@ Other examples:
 ```powershell
 # Default when no window is specified: compare last 30 days vs prior 5 months.
 python .\skills\trender\scripts\trender.py "agentic AI" --agent-web-file .\agent-web.json
+
+# Include an agent-authored BLUF and forward outlook.
+python .\skills\trender\scripts\trender.py "agentic AI" --agent-web-file .\agent-web.json --narrative-file .\narrative.json
 
 # Compare two lookback windows.
 python .\skills\trender\scripts\trender.py "agentic AI" --compare=7,30 --agent-web-file .\agent-web.json
