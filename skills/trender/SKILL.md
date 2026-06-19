@@ -1,7 +1,7 @@
 ---
 name: trender
-version: "0.5.0"
-description: "Map how a topic is evolving across flexible time windows using last30days-style multi-source research plus trend scoring and HTML trend maps."
+version: "0.6.0"
+description: "Map how a topic is evolving across time. The host agent does bucketed deep web research; Trender clusters, scores momentum, surfaces emerging entities and vocabulary drift, and renders a trend map."
 argument-hint: 'trender "agentic AI" --days=90 | trender "MCP servers" --compare=7,30 | trender "AI coding agents" --from=2026-01-01 --to=2026-06-01 --emit=html'
 allowed-tools: Bash, Read, Write, AskUserQuestion, WebSearch
 homepage: https://github.com/your-org/trender-skill
@@ -40,78 +40,108 @@ metadata:
 
 # Trender Skill
 
-Trender uses broad `last30days`-style research as its evidence substrate, then adds trend-specific analysis:
+`last30days` answers: "What are people saying recently?"
+`trender` answers: **"How is this changing over time, what's emerging or accelerating, and what evidence supports that?"**
 
-- flexible time windows instead of a hardcoded last 30 days
-- adaptive temporal buckets
-- cross-source theme clustering
-- momentum and direction scoring
-- compare windows such as 7 vs 30 days or 30 vs 90 days
-- optional self-contained HTML trend maps
-- host-agent web research via `--agent-web-file`
+Trender is **agent-native by design**. The host coding agent is the *primary* researcher: it does bucketed deep web research first, hands the JSON to Trender, and Trender layers community signal (via bundled `last30days`) plus trend analytics on top.
 
-## Usage
+What Trender produces:
+- **Inflection moments** — biggest week-over-week jumps in volume, with the headline that broke that week.
+- **Emerging / Accelerating / Fading / Stable themes** — TF-IDF clusters with linear-regression slope and momentum.
+- **Then → Now quote pairs** per theme.
+- **Emerging entities** — capitalized n-grams new to the current window.
+- **Vocabulary drift** — terms with biggest baseline → current frequency lift.
+- **Forward signals** — predictions, roadmaps, forecasts, betting markets.
+- A self-contained HTML trend map and a Markdown synthesis.
 
-Run the engine script from this skill directory:
+## STEP 0 — Bucketed deep research (REQUIRED)
 
-```bash
-python3 "$SKILL_DIR/scripts/trender.py" "agentic AI" --days=90
-python3 "$SKILL_DIR/scripts/trender.py" "agentic AI" --compare=7,30
-python3 "$SKILL_DIR/scripts/trender.py" "MCP servers" --from=2026-01-01 --to=2026-06-01 --emit=json
-python3 "$SKILL_DIR/scripts/trender.py" "MCP servers" --agent-web-file /tmp/trender-agent-web.json
-python3 "$SKILL_DIR/scripts/trender.py" --diagnose
-python3 "$SKILL_DIR/scripts/trender.py" setup
-```
+Before invoking the script, the host agent **must** gather web evidence into five buckets and write JSON. Running Trender without `--agent-web-file` falls back to community-only signal and the report will say so explicitly.
 
-Trender ships with a compatible `last30days` engine under `vendor/last30days`, so no separate install is required for normal use.
+The five buckets — each a separate set of web searches, not one mega-query:
 
-Run `trender.py setup` once to let the bundled last30days engine discover browser cookies and write `~/.config/last30days/.env`. Run `trender.py --diagnose` to see which sources are currently available.
+| Bucket | What goes here | Example sources |
+|---|---|---|
+| `research` | Papers, benchmarks, evaluations, analyst reports | arXiv, Semantic Scholar, vendor research blogs |
+| `implementations` | Releases, repos, demos, framework versions | GitHub, Show HN, vendor changelogs |
+| `adoption` | Production use, enterprise rollouts, job postings, podcast/conf mentions | company blogs, podcast transcripts, Lever/Greenhouse, conf programs |
+| `criticism` | Limits, problems, regressions, cost/risk analyses | Reddit threads, blog post-mortems, HN comments |
+| `forecasts` | Predictions, roadmaps, RFCs, betting markets | Polymarket, vendor roadmaps, analyst forecasts |
 
-If you want to override the bundled engine, set:
+For each bucket, run **at least two query variants** spanning the comparison window (e.g. one query for the prior 5 months, one for the last 30 days). Capture concrete `published_at` dates — items without dates contribute nothing to trend analysis.
 
-```bash
-export LAST30DAYS_SKILL_DIR=/path/to/last30days/skill
-```
-
-or pass:
-
-```bash
-python3 "$SKILL_DIR/scripts/trender.py" "agentic AI" --last30days-dir /path/to/last30days
-```
-
-## Output Contract
-
-For normal user-facing output:
-
-1. Prefer using the host coding agent's WebSearch/deep-research capability before running the script. This skill is agent-native; the script is the trend scorer/renderer, not the only researcher.
-2. Search several query variants for the requested topic and timeframe.
-3. Write the host-agent web evidence to JSON:
+Write to `agent-web.json`:
 
 ```json
 {
-  "items": [
-    {
-      "title": "source title",
-      "url": "https://example.com/source",
-      "published_at": "YYYY-MM-DD",
-      "summary": "brief evidence summary",
-      "trend_theme": "generalized theme label",
-      "relevance_score": 0.9
-    }
-  ]
+  "buckets": {
+    "research": [
+      {"title": "...", "url": "https://...", "published_at": "2026-04-12",
+       "summary": "...", "source": "arxiv", "relevance_score": 0.9}
+    ],
+    "implementations": [...],
+    "adoption":        [...],
+    "criticism":       [...],
+    "forecasts":       [...]
+  }
 }
 ```
 
-4. Run `scripts/trender.py` with `--agent-web-file <path>`.
-5. Pass through its Markdown synthesis.
-6. HTML is the default output and opens automatically. Mention the saved HTML path.
-7. Do not invent unsupported trend claims. Every trend should trace back to original source evidence in the output.
+Legacy `{"items":[...]}` is still accepted; bucket is inferred from content.
 
-## What Makes Trender Different From last30days
+## Usage
 
-`last30days` answers: "What are people saying recently?"
+```bash
+# RECOMMENDED — agent runs Step 0 first, then:
+python3 "$SKILL_DIR/scripts/trender.py" "MCP servers" --agent-web-file ./agent-web.json
 
-`trender` answers: "How is the signal moving over time, which themes are emerging or accelerating, and what evidence supports that?"
+# With explicit comparison window (default is 30 vs 180 if nothing specified):
+python3 "$SKILL_DIR/scripts/trender.py" "agentic AI" --compare=30,180 --agent-web-file ./agent-web.json
+python3 "$SKILL_DIR/scripts/trender.py" "AI coding agents" --compare=7,30  --agent-web-file ./agent-web.json
 
-Trender should preserve the broad multi-source philosophy: Reddit, X, YouTube, TikTok, Instagram, HN, GitHub, Polymarket, Digg, Bluesky, web, and other sources supported by the installed `last30days` engine.
+# Explicit date range:
+python3 "$SKILL_DIR/scripts/trender.py" "MCP servers" --from=2026-01-01 --to=2026-06-01
+
+# Diagnostics + setup:
+python3 "$SKILL_DIR/scripts/trender.py" --diagnose
+python3 "$SKILL_DIR/scripts/trender.py" setup
+
+# Smoke test without network:
+python3 "$SKILL_DIR/scripts/trender.py" "MCP servers" --mock --emit=all --no-open
+```
+
+**Default window**: if you don't pass `--from`, `--days`, or `--compare`, Trender defaults to `--compare=30,180` (last 30 days vs prior 5 months) because trends require comparison.
+
+Trender ships a compatible `last30days` engine in `vendor/last30days`, so no separate install is required. Run `setup` once to discover browser cookies; run `--diagnose` to see active sources.
+
+## Source routing (community layer)
+
+Trender no longer blasts every subquery at every source. Subqueries route by intent:
+
+| Subquery | Sources |
+|---|---|
+| primary | reddit, hackernews, x, github, grounding |
+| research-and-claims | hackernews, grounding, perplexity, github |
+| implementations | github, hackernews, x |
+| community-friction | reddit, x, hackernews, bluesky |
+| forecasts | polymarket, grounding, x |
+| broader-social (low weight) | youtube, tiktok, instagram, threads, pinterest, digg, xiaohongshu, truthsocial |
+
+This is intentionally narrower than v0.5. Most "trend" signal does not come from TikTok; routing by intent reduces noise dramatically.
+
+## Output contract
+
+1. **Run Step 0 first.** Skipping it makes Trender a worse `last30days`.
+2. **Pass `--agent-web-file`** with bucketed JSON.
+3. Pass through Trender's Markdown synthesis. The HTML is the primary deliverable; mention its saved path.
+4. Every claim in the report must trace back to evidence with a URL. Do not invent.
+5. If a bucket comes back empty, the report will say so under "Coverage notes" — don't hide that.
+
+## Override bundled last30days
+
+```bash
+export LAST30DAYS_SKILL_DIR=/path/to/last30days/skill
+# or
+python3 "$SKILL_DIR/scripts/trender.py" "topic" --last30days-dir /path/to/last30days
+```
 

@@ -45,22 +45,21 @@ python .\skills\trender\scripts\trender.py setup
 
 ## Add host-agent web evidence
 
-Have the coding agent write a JSON file:
+Have the coding agent gather **bucketed** evidence — research, implementations, adoption, criticism, forecasts — and write a JSON file:
 
 ```json
 {
-  "items": [
-    {
-      "title": "source title",
-      "url": "https://example.com/source",
-      "published_at": "YYYY-MM-DD",
-      "summary": "brief evidence summary",
-      "trend_theme": "generalized theme label",
-      "relevance_score": 0.9
-    }
-  ]
+  "buckets": {
+    "research":        [{"title":"...", "url":"https://...", "published_at":"YYYY-MM-DD", "summary":"...", "source":"arxiv", "relevance_score":0.9}],
+    "implementations": [],
+    "adoption":        [],
+    "criticism":       [],
+    "forecasts":       []
+  }
 }
 ```
+
+The legacy `{"items":[...]}` shape is still accepted (bucket inferred from content). See `skills/trender/SKILL.md` Step 0 for the full contract.
 
 Then run:
 

@@ -23,13 +23,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\skills\trender\scripts\ins
 ```bash
 python3 scripts/trender.py --diagnose
 python3 scripts/trender.py setup
-python3 scripts/trender.py "agentic AI" --days=90
-python3 scripts/trender.py "agentic AI" --compare=7,30
+
+# Default: compare last 30 days vs prior 5 months
+python3 scripts/trender.py "agentic AI" --agent-web-file ./agent-web.json
+
+# Explicit comparison windows
+python3 scripts/trender.py "agentic AI" --compare=7,30  --agent-web-file ./agent-web.json
 python3 scripts/trender.py "MCP servers" --from=2026-01-01 --to=2026-06-01 --emit=all
-python3 scripts/trender.py "MCP servers" --agent-web-file /tmp/trender-agent-web.json
+
+# Network-free smoke test
+python3 scripts/trender.py "MCP servers" --mock --emit=all --no-open
 ```
 
 HTML is the default output and opens automatically. Pass `--no-open` to only write the file.
+
+The host coding agent is expected to gather **bucketed** web evidence (research / implementations / adoption / criticism / forecasts) and pass it via `--agent-web-file`. See `SKILL.md` Step 0 for the JSON schema. Without it, Trender falls back to community signal only and the report will say so.
 
 Run `setup` once to let the bundled `last30days` engine discover browser cookies and write `~/.config/last30days/.env`. Run `--diagnose` to see which sources are currently available.
 

@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
-"""Trender skill engine.
+"""Trender skill engine (rewrite).
 
-This script layers trend analysis on top of the last30days research engine.
-It intentionally does not narrow the source set. Retrieval is delegated to
-last30days, and Trender analyzes the returned evidence across flexible windows.
+Trender maps how a topic is evolving across time. The host coding agent is the
+primary researcher: it gathers bucketed web evidence (research, implementations,
+adoption, criticism, forecasts) and writes it to JSON. last30days adds
+community color on top. This script analyzes the combined evidence for:
+
+  - Emerging / accelerating / fading / stable themes (TF-IDF clusters)
+  - Linear-regression slope across time buckets
+  - Emerging entities (capitalized n-grams new to the current window)
+  - Vocabulary drift (terms with biggest baseline -> current frequency lift)
+  - Inflection moments (biggest week-over-week jumps)
+  - Then/now quote pairs per theme
+  - Forward signals (predictions, roadmaps, forecasts, betting markets)
+
+It then renders a self-contained HTML trend map and a Markdown synthesis.
 """
 
 from __future__ import annotations
@@ -19,13 +30,13 @@ import sys
 import tempfile
 import webbrowser
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 
 
 @dataclass(frozen=True)
@@ -33,6 +44,10 @@ class Window:
     label: str
     start: date
     end: date
+
+    @property
+    def days(self) -> int:
+        return max(1, (self.end - self.start).days + 1)
 
 
 @dataclass
@@ -44,58 +59,50 @@ class EvidenceItem:
     url: str
     published_at: date | None
     score: float
-    raw: dict[str, Any]
+    bucket: str
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def text(self) -> str:
+        return f"{self.title}\n{self.body}".strip()
 
 
 @dataclass
 class TrendTheme:
     title: str
     direction: str
+    slope: float
     momentum: float
     current_count: int
     baseline_count: int
     source_diversity: int
+    bucket_mix: dict[str, int]
     score: float
-    windows: dict[str, int]
+    bucket_counts: dict[str, int]
     sources: list[str]
     evidence: list[EvidenceItem]
+    then_quote: EvidenceItem | None
+    now_quote: EvidenceItem | None
+    terms: list[str]
+
+
+@dataclass
+class InflectionMoment:
+    bucket_label: str
+    bucket_start: str
+    bucket_end: str
+    prior_count: int
+    bucket_count: int
+    lift: float
+    headline: EvidenceItem | None
+
+
+BUCKETS = ("research", "implementations", "adoption", "criticism", "forecasts", "community")
 
 
 def main() -> int:
     configure_stdio()
-    parser = argparse.ArgumentParser(description="Map topic trends using last30days evidence.")
-    parser.add_argument("topic", nargs="*", help="Topic to analyze, or 'setup' to configure bundled last30days")
-    parser.add_argument("--days", type=int, default=30, help="Lookback window in days. Default: 30.")
-    parser.add_argument("--from", dest="start", help="Explicit start date YYYY-MM-DD.")
-    parser.add_argument("--to", dest="end", help="Explicit end date YYYY-MM-DD.")
-    parser.add_argument(
-        "--compare",
-        help="Compare two lookback windows, e.g. 7,30 or 30,90. Uses current N days vs current M days.",
-    )
-    parser.add_argument("--emit", choices=["md", "json", "html", "all"], default="html")
-    parser.add_argument("--save-dir", default=os.getenv("TRENDER_OUTPUT_DIR", str(Path.home() / "Documents" / "Trender")))
-    parser.add_argument("--last30days-dir", default=os.getenv("LAST30DAYS_SKILL_DIR"))
-    parser.add_argument("--search", help="Comma-separated source list passed through to last30days.")
-    parser.add_argument("--quick", action="store_true", help="Pass --quick through to last30days.")
-    parser.add_argument("--deep", action="store_true", help="Pass --deep through to last30days.")
-    parser.add_argument("--mock", action="store_true", help="Use last30days mock retrieval fixtures.")
-    parser.add_argument("--web-research", choices=["off", "mock"], default="off", help="Deprecated. Use --agent-web-file. 'mock' is kept for tests.")
-    parser.add_argument(
-        "--agent-web-file",
-        default=os.getenv("TRENDER_AGENT_WEB_FILE"),
-        help=(
-            "JSON file of web evidence gathered by the host coding agent. "
-            "Schema: {items:[{title,url,published_at,summary,trend_theme,relevance_score}]} or a bare list."
-        ),
-    )
-    parser.add_argument("--keep-raw", action="store_true", help="Save raw last30days JSON beside Trender outputs.")
-    parser.add_argument("--diagnose", action="store_true", help="Show bundled last30days source/provider availability.")
-    parser.add_argument("--no-open", action="store_true", help="Do not open generated HTML reports automatically.")
-    parser.add_argument(
-        "--skip-last30days-preflight",
-        action="store_true",
-        help="Bypass last30days preflight checks. Use only when you intentionally want to skip setup/gates.",
-    )
+    parser = build_parser()
     args = parser.parse_args()
 
     topic = " ".join(args.topic).strip()
@@ -106,312 +113,232 @@ def main() -> int:
         return run_last30days_passthrough(last30days_dir, ["--diagnose"])
     if topic.lower() == "setup":
         return run_last30days_passthrough(last30days_dir, ["setup"])
-
     if not topic:
         raise SystemExit("topic is required, or run: trender.py setup / trender.py --diagnose")
 
     analysis_end = parse_date(args.end) if args.end else date.today()
+    explicit_window = bool(args.start or args.compare or args.days_was_set)
+    if args.compare:
+        compare_windows = parse_compare(args.compare, analysis_end)
+    elif not explicit_window:
+        compare_windows = parse_compare("30,180", analysis_end)
+    else:
+        compare_windows = []
+
     if args.start:
         analysis_start = parse_date(args.start)
         if analysis_start > analysis_end:
             raise SystemExit("--from must be before --to")
-        lookback_days = max(1, (date.today() - analysis_start).days + 1)
+    elif compare_windows:
+        analysis_start = compare_windows[0].start
     else:
-        lookback_days = max(1, args.days)
-        analysis_start = analysis_end - timedelta(days=lookback_days - 1)
+        analysis_start = analysis_end - timedelta(days=max(1, args.days) - 1)
 
-    compare_windows = parse_compare(args.compare, analysis_end)
     primary_window = Window("selected", analysis_start, analysis_end)
     required_lookback = max(
-        [lookback_days]
-        + [max(1, (date.today() - window.start).days + 1) for window in compare_windows]
+        [(analysis_end - analysis_start).days + 1]
+        + [(date.today() - w.start).days + 1 for w in compare_windows]
     )
 
-    raw_report = run_last30days(
-        last30days_dir=last30days_dir,
+    evidence: list[EvidenceItem] = []
+    if args.mock:
+        evidence.extend(mock_evidence(topic, primary_window, compare_windows))
+    else:
+        raw_report = run_last30days(
+            last30days_dir=last30days_dir,
+            topic=topic,
+            days=max(1, required_lookback),
+            search=args.search,
+            quick=args.quick,
+            deep=args.deep,
+            skip_preflight=args.skip_last30days_preflight,
+        )
+        evidence.extend(flatten_last30days_evidence(raw_report))
+
+    agent_items = load_agent_web_research(args.agent_web_file)
+    evidence.extend(agent_items)
+    evidence = dedupe_evidence(evidence)
+
+    overall_start = min([w.start for w in compare_windows] + [primary_window.start])
+    overall_end = primary_window.end
+    in_scope = [
+        e for e in evidence
+        if e.published_at is None or overall_start <= e.published_at <= overall_end
+    ]
+
+    buckets = make_time_buckets(overall_start, overall_end)
+    themes = cluster_and_analyze(
+        in_scope,
         topic=topic,
-        days=required_lookback,
-        search=args.search,
-        quick=args.quick,
-        deep=args.deep,
-        mock=args.mock,
-        skip_preflight=args.skip_last30days_preflight,
+        buckets=buckets,
+        compare_windows=compare_windows or [primary_window],
     )
-    evidence = flatten_evidence(raw_report)
-    clusters = raw_report.get("clusters", [])
-    native_web_items = mock_web_research(topic, primary_window) if args.web_research == "mock" else []
-    if native_web_items:
-        evidence.extend(native_web_items)
-        clusters.extend(clusters_from_native_web(native_web_items))
-    agent_web_items = load_agent_web_research(
-        path=args.agent_web_file,
-        topic=topic,
-        window=primary_window,
-    )
-    if agent_web_items:
-        evidence.extend(agent_web_items)
-        clusters.extend(clusters_from_native_web(agent_web_items))
-    themes = analyze_trends(
-        clusters=clusters,
-        evidence=evidence,
-        topic=topic,
-        primary_window=primary_window,
-        compare_windows=compare_windows,
-    )
+    emerging_entities = compute_emerging_entities(in_scope, compare_windows or [primary_window])
+    vocab_drift = compute_vocabulary_drift(in_scope, compare_windows or [primary_window])
+    inflections = compute_inflection_moments(in_scope, buckets)
+    forward = collect_forward_signals(in_scope)
+
     payload = {
         "topic": topic,
+        "version": VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "window": serialize_window(primary_window),
-        "compare_windows": [serialize_window(window) for window in compare_windows],
+        "compare_windows": [serialize_window(w) for w in compare_windows],
+        "buckets": [serialize_window(b) for b in buckets],
         "retrieval_days": required_lookback,
-        "source_counts": dict(Counter(item.source for item in evidence)),
-        "coverage_notes": coverage_notes(evidence),
-        "themes": [serialize_theme(theme) for theme in themes],
-        "source_count": len(evidence),
+        "source_count": len(in_scope),
+        "source_counts": dict(Counter(e.source for e in in_scope)),
+        "bucket_counts": dict(Counter(e.bucket for e in in_scope)),
+        "themes": [serialize_theme(t) for t in themes],
+        "emerging_entities": emerging_entities,
+        "vocabulary_drift": vocab_drift,
+        "inflection_moments": [serialize_inflection(m) for m in inflections],
+        "forward_signals": [serialize_evidence(e) for e in forward[:12]],
+        "coverage_notes": coverage_notes(in_scope, bool(args.agent_web_file)),
         "last30days_dir": str(last30days_dir),
-        "native_web_research": {
-            "mode": args.web_research,
-            "items": len(native_web_items),
-            "agent_items": len(agent_web_items),
-            "agent_web_file": str(args.agent_web_file or ""),
-            "available": {"agent_web_file": bool(args.agent_web_file)},
-        },
     }
 
     save_dir = Path(args.save_dir).expanduser()
     save_dir.mkdir(parents=True, exist_ok=True)
     slug = slugify(topic)
-    paths: dict[str, str] = {}
-    if args.keep_raw:
-        raw_path = save_dir / f"{slug}-last30days-raw.json"
-        raw_path.write_text(json.dumps(raw_report, indent=2, sort_keys=True), encoding="utf-8")
-        paths["raw"] = str(raw_path)
+    html_path = save_dir / f"{slug}-trend-map.html"
+    json_path = save_dir / f"{slug}-trend-map.json"
 
+    if args.emit in ("html", "all"):
+        html_path.write_text(render_html(payload), encoding="utf-8")
+    if args.emit in ("json", "all"):
+        json_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     if args.emit == "json":
         print(json.dumps(payload, indent=2, sort_keys=True))
-    elif args.emit == "html":
-        html_path = save_dir / f"{slug}-trend-map.html"
-        html_path.write_text(render_html(payload), encoding="utf-8")
-        if not args.no_open:
-            open_html_report(html_path)
-        write_markdown(render_markdown(payload, html_path=html_path))
-    else:
-        write_markdown(render_markdown(payload))
+        return 0
 
-    if args.emit == "all":
-        json_path = save_dir / f"{slug}-trend-map.json"
-        html_path = save_dir / f"{slug}-trend-map.html"
-        json_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        html_path.write_text(render_html(payload), encoding="utf-8")
-        if not args.no_open:
-            open_html_report(html_path)
-        write_markdown(render_markdown(payload, html_path=html_path, json_path=json_path))
-
+    md = render_markdown(
+        payload,
+        html_path=html_path if args.emit in ("html", "all") else None,
+        json_path=json_path if args.emit == "all" else None,
+    )
+    write_stdout(md)
+    if args.emit in ("html", "all") and not args.no_open:
+        open_html_report(html_path)
     return 0
 
 
-def load_agent_web_research(
-    *,
-    path: str | None,
-    topic: str,
-    window: Window,
-) -> list[EvidenceItem]:
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Map topic trends across time.")
+    parser.add_argument("topic", nargs="*")
+    parser.add_argument("--days", type=int, default=30)
+    parser.add_argument("--from", dest="start")
+    parser.add_argument("--to", dest="end")
+    parser.add_argument("--compare", help="Two lookbacks, e.g. 30,180. Default when no window specified.")
+    parser.add_argument("--emit", choices=["md", "json", "html", "all"], default="html")
+    parser.add_argument(
+        "--save-dir",
+        default=os.getenv("TRENDER_OUTPUT_DIR", str(Path.home() / "Documents" / "Trender")),
+    )
+    parser.add_argument("--last30days-dir", default=os.getenv("LAST30DAYS_SKILL_DIR"))
+    parser.add_argument("--search")
+    parser.add_argument("--quick", action="store_true")
+    parser.add_argument("--deep", action="store_true")
+    parser.add_argument("--mock", action="store_true")
+    parser.add_argument("--agent-web-file", default=os.getenv("TRENDER_AGENT_WEB_FILE"))
+    parser.add_argument("--diagnose", action="store_true")
+    parser.add_argument("--no-open", action="store_true")
+    parser.add_argument("--skip-last30days-preflight", action="store_true")
+    args_seen = sys.argv[1:]
+    parser.set_defaults(days_was_set=any(a == "--days" or a.startswith("--days=") for a in args_seen))
+    return parser
+
+
+def load_agent_web_research(path: str | None) -> list[EvidenceItem]:
     if not path:
         return []
-    source_path = Path(path).expanduser()
-    if not source_path.exists():
-        raise SystemExit(f"--agent-web-file does not exist: {source_path}")
-    payload = json.loads(source_path.read_text(encoding="utf-8"))
-    raw_items = payload.get("items", payload) if isinstance(payload, dict) else payload
-    if not isinstance(raw_items, list):
-        raise SystemExit("--agent-web-file must be a JSON list or an object with an 'items' list")
-    return web_items_from_payload(
-        raw_items,
-        source="trender-agent-web",
-        topic=topic,
-        window=window,
+    p = Path(path).expanduser()
+    if not p.exists():
+        raise SystemExit(f"--agent-web-file does not exist: {p}")
+    payload = json.loads(p.read_text(encoding="utf-8"))
+    items: list[EvidenceItem] = []
+    if isinstance(payload, dict) and isinstance(payload.get("buckets"), dict):
+        for bucket_name, bucket_items in payload["buckets"].items():
+            if not isinstance(bucket_items, list):
+                continue
+            for raw in bucket_items:
+                item = build_evidence_from_agent(raw, default_bucket=bucket_name)
+                if item:
+                    items.append(item)
+    else:
+        legacy_items = payload.get("items", payload) if isinstance(payload, dict) else payload
+        if not isinstance(legacy_items, list):
+            raise SystemExit("--agent-web-file must be a JSON object with 'buckets' or 'items'.")
+        for raw in legacy_items:
+            item = build_evidence_from_agent(raw, default_bucket=None)
+            if item:
+                items.append(item)
+    return items
+
+
+def build_evidence_from_agent(raw: Any, *, default_bucket: str | None) -> EvidenceItem | None:
+    if not isinstance(raw, dict):
+        return None
+    url = str(raw.get("url") or "").strip()
+    if not url:
+        return None
+    title = str(raw.get("title") or url).strip()
+    body = str(raw.get("summary") or raw.get("body") or "").strip()
+    published = try_parse_date(raw.get("published_at"))
+    bucket = (default_bucket or infer_bucket(raw, title, body) or "research").lower()
+    if bucket not in BUCKETS:
+        bucket = "research"
+    try:
+        relevance = float(raw.get("relevance_score", 0.75))
+    except (TypeError, ValueError):
+        relevance = 0.75
+    return EvidenceItem(
+        id=url,
+        source=str(raw.get("source") or "agent-web"),
+        title=title,
+        body=body,
+        url=url,
+        published_at=published,
+        score=max(1.0, relevance * 100.0),
+        bucket=bucket,
+        raw=raw,
     )
 
 
-def mock_web_research(topic: str, window: Window) -> list[EvidenceItem]:
-    samples = [
-        ("Primary research and analysis", f"{topic} research analysis shows new adoption patterns"),
-        ("Implementation releases", f"New open implementation demonstrates {topic} in practice"),
-        ("Market and adoption signals", f"Teams report production experiments around {topic}"),
-    ]
-    items = []
-    for index, (theme, title) in enumerate(samples):
-        published = window.end - timedelta(days=index * 7)
-        items.append(
-            EvidenceItem(
-                id=f"mock-web-{index}",
-                source="trender-web-mock",
-                title=title,
-                body=f"Mock web evidence for {topic}.",
-                url=f"https://example.com/{slugify(topic)}/{index}",
-                published_at=published,
-                score=40.0 - index,
-                raw={"trend_theme": theme},
-            )
-        )
-    return items
-
-
-def clusters_from_native_web(items: list[EvidenceItem]) -> list[dict[str, Any]]:
-    grouped: dict[str, list[EvidenceItem]] = defaultdict(list)
-    for item in items:
-        grouped[str(item.raw.get("trend_theme") or classify_web_result_theme("", item.title, item.body))].append(item)
-    return [
-        {
-            "cluster_id": f"trender-web-{slugify(theme)}",
-            "title": theme,
-            "candidate_ids": [item.id for item in grouped_items],
-            "representative_ids": [grouped_items[0].id],
-            "score": sum(item.score for item in grouped_items),
-            "sources": sorted({item.source for item in grouped_items}),
-        }
-        for theme, grouped_items in grouped.items()
-        if grouped_items
-    ]
-
-
-def web_items_from_payload(raw_items: list[Any], *, source: str, topic: str, window: Window) -> list[EvidenceItem]:
-    items: list[EvidenceItem] = []
-    seen: set[str] = set()
-    for index, raw in enumerate(raw_items):
-        if not isinstance(raw, dict):
-            continue
-        url = str(raw.get("url") or "")
-        if not url or url in seen:
-            continue
-        seen.add(url)
-        published = try_parse_date(raw.get("published_at")) or window.end
-        if not (window.start <= published <= window.end):
-            continue
-        title = str(raw.get("title") or url)
-        summary = str(raw.get("summary") or "")
-        theme = str(raw.get("trend_theme") or classify_web_result_theme(topic, title, summary))
-        try:
-            relevance = float(raw.get("relevance_score", 0.75))
-        except (TypeError, ValueError):
-            relevance = 0.75
-        items.append(
-            EvidenceItem(
-                id=url,
-                source=source,
-                title=title,
-                body=summary,
-                url=url,
-                published_at=published,
-                score=max(1.0, relevance * 100.0),
-                raw={**raw, "trend_theme": theme},
-            )
-        )
-        if len(items) >= 50:
-            break
-    return items
-
-
-def classify_web_result_theme(topic: str, title: str, body: str) -> str:
+def infer_bucket(raw: dict[str, Any], title: str, body: str) -> str | None:
+    explicit = str(raw.get("bucket") or raw.get("trend_theme") or "").lower()
+    if explicit:
+        for b in BUCKETS:
+            if b in explicit:
+                return b
     text = f"{title} {body}".lower()
-    topic_label = md_text(topic).strip() or "Web evidence"
-    if any(term in text for term in ["paper", "research", "benchmark", "evaluation", "study", "analysis"]):
-        return f"{topic_label}: research, benchmarks, and evaluation"
-    if any(term in text for term in ["release", "launch", "github", "open source", "implementation", "demo", "tool"]):
-        return f"{topic_label}: implementations, releases, and demos"
-    if any(term in text for term in ["adoption", "production", "workflow", "use case", "enterprise", "customer"]):
-        return f"{topic_label}: workflows, use cases, and adoption"
-    if any(term in text for term in ["funding", "market", "acquisition", "report", "announces", "news"]):
-        return f"{topic_label}: news, market, and external signals"
-    if any(term in text for term in ["problem", "risk", "limit", "issue", "bug", "cost", "pricing"]):
-        return f"{topic_label}: problems, limits, and adoption friction"
-    return f"{topic_label}: web evidence"
-
-
-def write_markdown(markdown: str) -> None:
-    output = markdown.replace("\n", os.linesep)
-    if not markdown.endswith("\n"):
-        output += os.linesep
-    buffer = getattr(sys.stdout, "buffer", None)
-    if buffer is not None:
-        buffer.write(output.encode("utf-8", errors="replace"))
-        buffer.flush()
-    else:
-        sys.stdout.write(output)
-
-
-def open_html_report(path: Path) -> None:
-    try:
-        webbrowser.open(path.resolve().as_uri())
-    except Exception:
-        if os.name == "nt":
-            os.startfile(str(path.resolve()))  # type: ignore[attr-defined]
-        else:
-            raise
+    if any(k in text for k in ("arxiv", "paper", "benchmark", "evaluation", "study")):
+        return "research"
+    if any(k in text for k in ("release", "open source", "github", "implementation", "demo", "launch")):
+        return "implementations"
+    if any(k in text for k in ("adoption", "production", "enterprise", "workflow", "customer", "deployed")):
+        return "adoption"
+    if any(k in text for k in ("limit", "problem", "broken", "bug", "criticism", "concern", "risk")):
+        return "criticism"
+    if any(k in text for k in ("forecast", "predict", "by 202", "roadmap", "rfc", "expects", "polymarket")):
+        return "forecasts"
+    return None
 
 
 def run_last30days_passthrough(last30days_dir: Path, args: list[str]) -> int:
-    cmd = [
-        resolve_python_for_last30days(),
-        str(last30days_dir / "scripts" / "last30days.py"),
-        *args,
-    ]
+    cmd = [resolve_python_for_last30days(), str(last30days_dir / "scripts" / "last30days.py"), *args]
     proc = subprocess.run(cmd, cwd=str(last30days_dir), env=os.environ.copy(), check=False)
     return proc.returncode
 
 
-def configure_stdio() -> None:
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if callable(reconfigure):
-            reconfigure(encoding="utf-8", errors="replace")
-
-
-def resolve_last30days_dir(configured: str | None, skill_dir: Path) -> Path:
-    candidates = []
-    if configured:
-        candidates.append(Path(configured).expanduser())
-    candidates.extend(
-        [
-            skill_dir / "vendor" / "last30days",
-            skill_dir.parent / "last30days",
-            Path.home() / ".claude" / "skills" / "last30days",
-            Path.home() / ".codex" / "skills" / "last30days",
-            Path.home() / ".agents" / "skills" / "last30days",
-            Path.home() / ".openclaw" / "skills" / "last30days",
-        ]
-    )
-    for candidate in candidates:
-        if (candidate / "scripts" / "last30days.py").exists():
-            return candidate
-    checked = "\n".join(f"  - {path}" for path in candidates)
-    raise SystemExit(
-        "Could not find last30days skill engine. The packaged vendor copy may be missing; "
-        "rebuild/reinstall Trender or set LAST30DAYS_SKILL_DIR.\n"
-        f"Checked:\n{checked}"
-    )
-
-
-def run_last30days(
-    *,
-    last30days_dir: Path,
-    topic: str,
-    days: int,
-    search: str | None,
-    quick: bool,
-    deep: bool,
-    mock: bool,
-    skip_preflight: bool,
-) -> dict[str, Any]:
+def run_last30days(*, last30days_dir: Path, topic: str, days: int, search: str | None,
+                    quick: bool, deep: bool, skip_preflight: bool) -> dict[str, Any]:
     plan_path = write_trender_plan(topic)
     cmd = [
         resolve_python_for_last30days(),
         str(last30days_dir / "scripts" / "last30days.py"),
-        topic,
-        "--emit=json",
-        f"--days={days}",
-        "--plan",
-        str(plan_path),
+        topic, "--emit=json", f"--days={days}",
+        "--plan", str(plan_path),
     ]
     if search:
         cmd.extend(["--search", search])
@@ -419,29 +346,19 @@ def run_last30days(
         cmd.append("--quick")
     if deep:
         cmd.append("--deep")
-    if mock:
-        cmd.append("--mock")
-
     env = os.environ.copy()
     if skip_preflight:
         env["LAST30DAYS_SKIP_PREFLIGHT"] = "1"
     try:
         proc = subprocess.run(
-            cmd,
-            cwd=str(last30days_dir),
-            env=env,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
+            cmd, cwd=str(last30days_dir), env=env,
+            text=True, encoding="utf-8", errors="replace",
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
         )
         if proc.returncode != 0:
             raise SystemExit(
                 "last30days retrieval failed.\n"
-                f"Command: {' '.join(cmd)}\n"
-                f"STDERR:\n{proc.stderr}\nSTDOUT:\n{proc.stdout[-4000:]}"
+                f"Command: {' '.join(cmd)}\nSTDERR:\n{proc.stderr}\nSTDOUT:\n{proc.stdout[-4000:]}"
             )
         return parse_json_from_mixed_output(proc.stdout)
     finally:
@@ -461,145 +378,49 @@ def write_trender_plan(topic: str) -> Path:
 
 def build_trender_plan(topic: str) -> dict[str, Any]:
     core = topic.strip()
-    quoted = core
-    sources = [
-        "reddit",
-        "x",
-        "youtube",
-        "tiktok",
-        "instagram",
-        "hackernews",
-        "bluesky",
-        "truthsocial",
-        "grounding",
-        "github",
-        "perplexity",
-        "threads",
-        "pinterest",
-        "xquik",
-        "digg",
-        "polymarket",
-        "xiaohongshu",
-    ]
-    source_weights = {source: 1.0 for source in sources}
-    source_weights.update(
-        {
-            "hackernews": 1.35,
-            "github": 1.3,
-            "reddit": 1.25,
-            "x": 1.2,
-            "grounding": 1.2,
-            "youtube": 1.1,
-            "digg": 1.1,
-        }
-    )
+    primary = ["reddit", "hackernews", "x", "github", "grounding"]
+    research = ["hackernews", "grounding", "perplexity", "github"]
+    implementations = ["github", "hackernews", "x"]
+    criticism = ["reddit", "x", "hackernews", "bluesky"]
+    forecasts = ["polymarket", "grounding", "x"]
+    broader = ["youtube", "tiktok", "instagram", "threads", "pinterest", "digg", "xiaohongshu", "truthsocial"]
+    all_sources = sorted({s for grp in [primary, research, implementations, criticism, forecasts, broader] for s in grp})
+    source_weights = {s: 1.0 for s in all_sources}
+    source_weights.update({
+        "hackernews": 1.35, "github": 1.3, "grounding": 1.25, "perplexity": 1.2,
+        "reddit": 1.2, "x": 1.1, "polymarket": 1.1,
+    })
     subqueries = [
-        {
-            "label": "primary",
-            "search_query": quoted,
-            "ranking_query": f"What recent evidence shows {core} changing, accelerating, or becoming important?",
-            "sources": sources,
-            "weight": 1.2,
-        },
-        {
-            "label": "implementations",
-            "search_query": f"{core} implementation open source github release",
-            "ranking_query": f"Which concrete projects, repos, releases, or implementations show momentum around {core}?",
-            "sources": sources,
-            "weight": 1.0,
-        },
-        {
-            "label": "research-and-claims",
-            "search_query": f"{core} research paper benchmark evaluation case study",
-            "ranking_query": f"What papers, benchmarks, evaluations, or case studies provide evidence for {core}?",
-            "sources": sources,
-            "weight": 1.0,
-        },
-        {
-            "label": "community-friction",
-            "search_query": f"{core} problems limitations adoption workflows examples",
-            "ranking_query": f"What are practitioners saying about use cases, limitations, adoption, and workflow friction for {core}?",
-            "sources": sources,
-            "weight": 0.95,
-        },
-        {
-            "label": "adjacent-phrasing",
-            "search_query": f"{core} trends emerging patterns adoption examples",
-            "ranking_query": f"What adjacent terminology or related phrases point to the same trend as {core}?",
-            "sources": sources,
-            "weight": 0.85,
-        },
+        {"label": "primary", "search_query": core,
+         "ranking_query": f"What recent evidence shows {core} changing, accelerating, or becoming important?",
+         "sources": primary, "weight": 1.2},
+        {"label": "research-and-claims", "search_query": f"{core} research paper benchmark evaluation",
+         "ranking_query": f"What new papers, benchmarks, or evaluations characterize {core}?",
+         "sources": research, "weight": 1.0},
+        {"label": "implementations", "search_query": f"{core} open source release implementation",
+         "ranking_query": f"Which new releases, repos, or implementations show momentum around {core}?",
+         "sources": implementations, "weight": 1.0},
+        {"label": "community-friction", "search_query": f"{core} problems limitations adoption workflows",
+         "ranking_query": f"What are practitioners saying about limits, friction, or adoption of {core}?",
+         "sources": criticism, "weight": 0.95},
+        {"label": "forecasts", "search_query": f"{core} prediction forecast roadmap will",
+         "ranking_query": f"What predictions, forecasts, or roadmaps point at where {core} is going?",
+         "sources": forecasts, "weight": 0.85},
+        {"label": "broader-social", "search_query": core,
+         "ranking_query": f"Mainstream/social discussion volume around {core}.",
+         "sources": broader, "weight": 0.6},
     ]
     return {
-        "intent": "concept",
-        "freshness_mode": "balanced_recent",
-        "cluster_mode": "story",
-        "source_weights": source_weights,
-        "subqueries": subqueries,
+        "intent": "concept", "freshness_mode": "balanced_recent", "cluster_mode": "story",
+        "source_weights": source_weights, "subqueries": subqueries,
         "notes": [
-            "Generated by Trender to improve recall for trend analysis.",
-            "Prefer concrete time-stamped evidence, implementations, practitioner discussion, and cross-source corroboration.",
+            "Generated by Trender. Subqueries route to source subsets matching their intent.",
+            "Trender prefers concrete time-stamped evidence and cross-source corroboration.",
         ],
     }
 
 
-def resolve_python_for_last30days() -> str:
-    configured = os.getenv("TRENDER_LAST30DAYS_PYTHON")
-    candidates = [configured] if configured else []
-    candidates.extend(
-        [
-            sys.executable,
-            shutil.which("python3.13"),
-            shutil.which("python3.12"),
-            shutil.which("python3"),
-            shutil.which("python"),
-        ]
-    )
-    seen: set[str] = set()
-    for candidate in candidates:
-        if not candidate or candidate in seen:
-            continue
-        seen.add(candidate)
-        if python_version_at_least(candidate, 3, 12):
-            return candidate
-    raise SystemExit(
-        "last30days requires Python 3.12+. Set TRENDER_LAST30DAYS_PYTHON to a Python 3.12+ executable."
-    )
-
-
-def python_version_at_least(executable: str, major: int, minor: int) -> bool:
-    try:
-        proc = subprocess.run(
-            [
-                executable,
-                "-c",
-                "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
-            ],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    except OSError:
-        return False
-    if proc.returncode != 0:
-        return False
-    try:
-        found_major, found_minor = (int(part) for part in proc.stdout.strip().split(".", 1))
-    except ValueError:
-        return False
-    return (found_major, found_minor) >= (major, minor)
-
-
-def parse_json_from_mixed_output(output: str) -> dict[str, Any]:
-    start = output.find("{")
-    end = output.rfind("}")
-    if start < 0 or end < start:
-        raise SystemExit("last30days did not return JSON output")
-    return json.loads(output[start : end + 1])
-
-
-def flatten_evidence(report: dict[str, Any]) -> list[EvidenceItem]:
+def flatten_last30days_evidence(report: dict[str, Any]) -> list[EvidenceItem]:
     items: list[EvidenceItem] = []
     for source, source_items in report.get("items_by_source", {}).items():
         if not isinstance(source_items, list):
@@ -611,349 +432,1610 @@ def flatten_evidence(report: dict[str, Any]) -> list[EvidenceItem]:
             title = first_text(raw, ["title", "headline", "name"]) or str(url or source)
             body = first_text(raw, ["body", "text", "summary", "description", "snippet"]) or ""
             published = parse_item_date(raw)
-            score = evidence_score(raw)
+            score = evidence_score_raw(raw)
             item_id = str(url or raw.get("item_id") or f"{source}:{len(items)}")
-            items.append(
-                EvidenceItem(
-                    id=item_id,
-                    source=source,
-                    title=str(title),
-                    body=str(body),
-                    url=str(url),
-                    published_at=published,
-                    score=score,
-                    raw=raw,
-                )
-            )
+            bucket = source_to_bucket(source) or infer_bucket(raw, title, body) or "community"
+            items.append(EvidenceItem(
+                id=item_id, source=source, title=str(title), body=str(body), url=str(url),
+                published_at=published, score=score, bucket=bucket, raw=raw,
+            ))
     return items
 
 
-def analyze_trends(
-    *,
-    clusters: list[dict[str, Any]],
-    evidence: list[EvidenceItem],
-    topic: str,
-    primary_window: Window,
-    compare_windows: list[Window],
-) -> list[TrendTheme]:
-    evidence_by_id = {item.id: item for item in evidence}
-    all_windows = compare_windows or split_window(primary_window)
+def source_to_bucket(source: str) -> str | None:
+    src = source.lower()
+    if src == "github":
+        return "implementations"
+    if src == "polymarket":
+        return "forecasts"
+    if src in ("perplexity", "grounding"):
+        return "research"
+    if src in ("reddit", "x", "bluesky", "threads", "tiktok", "instagram", "youtube", "truthsocial",
+               "hackernews", "digg", "pinterest", "xiaohongshu"):
+        return "community"
+    return None
+
+
+def dedupe_evidence(items: list[EvidenceItem]) -> list[EvidenceItem]:
+    by_key: dict[str, EvidenceItem] = {}
+    for item in items:
+        key = (item.url or item.id).lower()
+        if not key:
+            continue
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = item
+        elif existing.published_at is None and item.published_at is not None:
+            by_key[key] = item
+    return list(by_key.values())
+
+
+def evidence_score_raw(raw: dict[str, Any]) -> float:
+    score = 0.0
+    engagement = raw.get("engagement")
+    for key in ("score", "engagement_score", "freshness", "local_rank_score", "local_relevance"):
+        v = raw.get(key)
+        if isinstance(v, (int, float)):
+            score += float(v)
+    if isinstance(engagement, dict):
+        for key in ("score", "likes", "upvotes", "comments", "views", "rank_score", "postCount"):
+            v = engagement.get(key)
+            if isinstance(v, (int, float)):
+                score += min(float(v), 1000.0) / 20.0
+    return score or 1.0
+
+
+STOPWORDS = frozenset(
+    """a an and or but if then else of for to in on at by with from into over under
+    is are was were be been being have has had do does did this that these those it its
+    as so not no yes can will would would not would have would be would also could should
+    may might must about which what when where who whom why how than such only also
+    more most less least new now today yesterday just very really i you he she they them
+    we us our your their there here many much each all any both either neither some other
+    others another like get got make made go going gone goes come came use uses using used
+    show shown showing show hn ask hn launch hn ai""".split()
+)
+
+# Terms that are too generic to use as cluster *labels* even if they survive the
+# document-level stopword filter. Helps avoid labels like "home, broke, going".
+LABEL_BLACKLIST = frozenset(
+    """home broke going broken best version run runs running ran ship ships shipped
+    work works working worked time times today week weeks year years month months
+    day days hour hours minute minutes second seconds first second third fourth
+    big bigger biggest small smaller smallest large larger largest little long short
+    top bottom right wrong full empty open closed coming due
+    high low fast slow good bad better worse great cool nice fine simple easy hard
+    really actually just maybe probably perhaps certainly definitely possibly
+    quot amp lt gt apos nbsp http https www com org net io app blog post comment
+    thing things stuff something nothing anything everything anyone someone everyone
+    quite very pretty rather somewhat fairly highly""".split()
+)
+_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_+-]{1,}")
+
+
+def tokenize(text: str) -> list[str]:
+    return [w.lower() for w in _WORD_RE.findall(text) if w.lower() not in STOPWORDS and len(w) > 2]
+
+
+def title_bigrams(title: str) -> list[str]:
+    toks = tokenize(title)
+    return [f"{a} {b}" for a, b in zip(toks, toks[1:]) if a not in LABEL_BLACKLIST and b not in LABEL_BLACKLIST]
+
+
+def tfidf_vectors(items: list[EvidenceItem]) -> tuple[list[dict[str, float]], dict[str, float]]:
+    """Document vectors weighted toward titles (titles are denser signal than bodies)."""
+    docs: list[list[str]] = []
+    for item in items:
+        title_tokens = tokenize(item.title)
+        body_tokens = tokenize(item.body)
+        # boost titles 3x in TF
+        docs.append(title_tokens * 3 + body_tokens)
+    df: Counter[str] = Counter()
+    for doc in docs:
+        for term in set(doc):
+            df[term] += 1
+    n = max(1, len(docs))
+    idf = {term: math.log((1 + n) / (1 + count)) + 1.0 for term, count in df.items()}
+    vectors: list[dict[str, float]] = []
+    for doc in docs:
+        tf = Counter(doc)
+        if not tf:
+            vectors.append({})
+            continue
+        max_tf = max(tf.values())
+        vec = {term: (count / max_tf) * idf.get(term, 0.0) for term, count in tf.items()}
+        norm = math.sqrt(sum(v * v for v in vec.values())) or 1.0
+        vectors.append({k: v / norm for k, v in vec.items()})
+    return vectors, idf
+
+
+def cosine(a: dict[str, float], b: dict[str, float]) -> float:
+    if not a or not b:
+        return 0.0
+    if len(a) > len(b):
+        a, b = b, a
+    return sum(weight * b.get(term, 0.0) for term, weight in a.items())
+
+
+def cluster_items(items: list[EvidenceItem], vectors: list[dict[str, float]],
+                   *, threshold: float = 0.22) -> list[list[int]]:
+    """Greedy cosine clustering with a small bucket-affinity boost."""
+    clusters: list[dict[str, Any]] = []
+    for idx, vec in enumerate(vectors):
+        item = items[idx]
+        if not vec:
+            clusters.append({"indices": [idx], "centroid": dict(vec), "buckets": Counter([item.bucket]), "size": 1})
+            continue
+        best_i = -1
+        best_sim = 0.0
+        for ci, cluster in enumerate(clusters):
+            sim = cosine(vec, cluster["centroid"])
+            # bucket boost: items in same dominant bucket are slightly more similar
+            dominant_bucket = cluster["buckets"].most_common(1)[0][0]
+            if dominant_bucket == item.bucket:
+                sim += 0.04
+            if sim > best_sim:
+                best_sim = sim
+                best_i = ci
+        if best_i >= 0 and best_sim >= threshold:
+            cluster = clusters[best_i]
+            cluster["indices"].append(idx)
+            cluster["buckets"][item.bucket] += 1
+            new_size = cluster["size"] + 1
+            centroid = cluster["centroid"]
+            for term, weight in vec.items():
+                centroid[term] = centroid.get(term, 0.0) + (weight - centroid.get(term, 0.0)) / new_size
+            cluster["size"] = new_size
+        else:
+            clusters.append({"indices": [idx], "centroid": dict(vec), "buckets": Counter([item.bucket]), "size": 1})
+    return [c["indices"] for c in clusters]
+
+
+def label_cluster(cluster_items_list: list[EvidenceItem], vectors: list[dict[str, float]],
+                   indices: list[int], *, topic: str, idf: dict[str, float]) -> tuple[str, list[str]]:
+    """Generate a clean human-readable label from titles only.
+
+    Strategy: aggregate IDF-weighted unigrams + bigrams from titles across the
+    cluster, drop topic words and label-blacklisted generic terms, prefer
+    bigrams when they meet a frequency floor, fall back to top unigrams.
+    """
+    topic_set = set(tokenize(topic))
+    titles = [it.title for it in cluster_items_list]
+
+    unigram_score: Counter[str] = Counter()
+    for title in titles:
+        for tok in tokenize(title):
+            if tok in topic_set or tok in LABEL_BLACKLIST or len(tok) < 3:
+                continue
+            unigram_score[tok] += idf.get(tok, 1.0)
+
+    bigram_score: Counter[str] = Counter()
+    bigram_freq: Counter[str] = Counter()
+    for title in titles:
+        for bg in title_bigrams(title):
+            a, b = bg.split(" ", 1)
+            if a in topic_set and b in topic_set:
+                continue
+            if a in LABEL_BLACKLIST or b in LABEL_BLACKLIST:
+                continue
+            bigram_score[bg] += idf.get(a, 1.0) + idf.get(b, 1.0)
+            bigram_freq[bg] += 1
+
+    # Prefer bigrams that actually repeat in the cluster (real phrases, not noise).
+    repeat_bigrams = [bg for bg, n in bigram_freq.items() if n >= 2]
+    if repeat_bigrams:
+        repeat_bigrams.sort(key=lambda bg: bigram_score[bg], reverse=True)
+        chosen = repeat_bigrams[:2]
+        # Add one supporting unigram not already covered
+        covered = set(" ".join(chosen).split())
+        extra = [t for t, _ in unigram_score.most_common(10) if t not in covered]
+        if extra:
+            chosen.append(extra[0])
+        terms = chosen
+    else:
+        # No repeating phrases — use top distinctive unigrams
+        terms = [t for t, _ in unigram_score.most_common(3)]
+        # If still empty (very short cluster), fall back to first title's distinctive words
+        if not terms:
+            terms = [t for t, _ in unigram_score.most_common(3)] or [
+                cluster_items_list[0].title[:60].rstrip()
+            ]
+
+    title = humanize_label(terms)
+    return title, terms
+
+
+def humanize_label(terms: list[str]) -> str:
+    if not terms:
+        return "Untitled cluster"
+    parts = []
+    for term in terms:
+        words = term.split()
+        # Title-case acronyms-aware: keep ALL-CAPS acronyms uppercase, capitalize others
+        cleaned = " ".join(w.upper() if len(w) <= 4 and w.isalpha() and w.lower() in {"ai", "api", "llm", "mcp", "rfc", "ide", "cli", "sdk", "gpu", "tts", "ocr"} else w.capitalize() for w in words)
+        parts.append(cleaned)
+    return " · ".join(parts)
+
+
+
+def make_time_buckets(start: date, end: date) -> list[Window]:
+    days = max(1, (end - start).days + 1)
+    if days <= 14:
+        bucket_days = 1
+    elif days <= 45:
+        bucket_days = 3
+    elif days <= 180:
+        bucket_days = 7
+    else:
+        bucket_days = 14
+    buckets: list[Window] = []
+    cur = start
+    while cur <= end:
+        bend = min(end, cur + timedelta(days=bucket_days - 1))
+        label = cur.isoformat() if bucket_days == 1 else f"{cur.isoformat()}..{bend.isoformat()}"
+        buckets.append(Window(label, cur, bend))
+        cur = bend + timedelta(days=1)
+    return buckets
+
+
+def count_in_window(items: list[EvidenceItem], window: Window) -> int:
+    return sum(1 for e in items if e.published_at and window.start <= e.published_at <= window.end)
+
+
+def linear_slope(values: list[float]) -> float:
+    n = len(values)
+    if n < 2:
+        return 0.0
+    xs = list(range(n))
+    mx = sum(xs) / n
+    my = sum(values) / n
+    num = sum((x - mx) * (y - my) for x, y in zip(xs, values))
+    den = sum((x - mx) ** 2 for x in xs) or 1.0
+    return num / den
+
+
+def cluster_and_analyze(items: list[EvidenceItem], *, topic: str, buckets: list[Window],
+                         compare_windows: list[Window]) -> list[TrendTheme]:
+    if not items:
+        return []
+    vectors, idf = tfidf_vectors(items)
+    cluster_indices = cluster_items(items, vectors)
+
+    # Drop singleton clusters from theme display — they're noise and inflate
+    # overview counts. They still flow through entity / vocab / inflection
+    # analyses elsewhere because those operate over `items` directly.
+    cluster_indices = [c for c in cluster_indices if len(c) >= 2]
 
     themes: list[TrendTheme] = []
-    used_ids: set[str] = set()
-    for cluster in clusters:
-        ids = [str(value) for value in cluster.get("candidate_ids", []) + cluster.get("representative_ids", [])]
-        cluster_items = []
-        for candidate_id in ids:
-            match = evidence_by_id.get(candidate_id) or fuzzy_find_item(candidate_id, evidence)
-            if match and match.id not in {item.id for item in cluster_items}:
-                cluster_items.append(match)
-                used_ids.add(match.id)
-        if not cluster_items:
-            continue
-        themes.append(
-            theme_from_items(
-                str(cluster.get("title") or "Untitled theme"),
-                cluster_items,
-                all_windows,
-                topic=topic,
-                compare_mode=bool(compare_windows),
-            )
-        )
-
-    if not themes:
-        grouped: dict[str, list[EvidenceItem]] = defaultdict(list)
-        for item in evidence:
-            grouped[item.source].append(item)
-        for source, items in grouped.items():
-            themes.append(
-                theme_from_items(
-                    f"{source} signal",
-                    items,
-                    all_windows,
-                    topic=topic,
-                    compare_mode=bool(compare_windows),
-                )
-            )
-
-    themes = [theme for theme in themes if theme.score > 0]
-    themes = consolidate_themes(topic, themes, all_windows, bool(compare_windows))
-    themes.sort(key=lambda theme: (direction_rank(theme.direction), theme.momentum, theme.score), reverse=True)
-    return themes[:12]
+    for indices in cluster_indices:
+        cluster_items_list = [items[i] for i in indices]
+        title, terms = label_cluster(cluster_items_list, vectors, indices, topic=topic, idf=idf)
+        themes.append(build_theme(title, terms, cluster_items_list, buckets, compare_windows))
+    themes = [t for t in themes if t.current_count + t.baseline_count > 0 or len(t.evidence) > 0]
+    themes.sort(key=lambda t: (direction_rank(t.direction), t.score), reverse=True)
+    return themes
 
 
-def consolidate_themes(
-    topic: str,
-    themes: list[TrendTheme],
-    windows: list[Window],
-    compare_mode: bool,
-) -> list[TrendTheme]:
-    grouped: dict[str, list[EvidenceItem]] = defaultdict(list)
-    passthrough: list[TrendTheme] = []
-    seen_by_group: dict[str, set[str]] = defaultdict(set)
-
-    for theme in themes:
-        group = classify_theme_group(topic, theme)
-        if not group:
-            passthrough.append(theme)
-            continue
-        for item in theme.evidence:
-            if item.id in seen_by_group[group]:
-                continue
-            grouped[group].append(item)
-            seen_by_group[group].add(item.id)
-
-    consolidated = [
-        theme_from_items(group, items, windows, topic=topic, compare_mode=compare_mode)
-        for group, items in grouped.items()
-        if items
-    ]
-    return [theme for theme in consolidated if theme.score > 0] + passthrough
-
-
-def classify_theme_group(topic: str, theme: TrendTheme) -> str:
-    text = " ".join([theme.title, *[item.title for item in theme.evidence], *[item.body[:500] for item in theme.evidence]]).lower()
-    topic_label = md_text(topic).strip()
-    if any(term in text for term in ["bug", "issue", "limit", "limitation", "regression", "broken", "fail", "error", "complaint", "pricing", "quota", "cost"]):
-        return f"{topic_label}: problems, limits, and adoption friction"
-    if any(term in text for term in ["paper", "arxiv", "research", "benchmark", "evaluation", "eval", "study", "analysis", "case study"]):
-        return f"{topic_label}: research, benchmarks, and evaluation"
-    if any(term in text for term in ["github", "repo", "release", "open source", "open-source", "implementation", "framework", "tool", "library", "show hn", "demo", "launch"]):
-        return f"{topic_label}: implementations, releases, and demos"
-    if any(term in text for term in ["workflow", "workflows", "use case", "use cases", "adoption", "production", "teams", "users", "customer", "enterprise"]):
-        return f"{topic_label}: workflows, use cases, and adoption"
-    if any(term in text for term in ["news", "report", "funding", "market", "polymarket", "odds", "acquisition", "announces"]):
-        return f"{topic_label}: news, market, and external signals"
-    compact = re.sub(r"\s+", " ", md_text(theme.title)).strip()
-    return compact[:96] or f"{topic_label}: uncategorized evidence"
-
-
-def theme_from_items(
-    title: str,
-    items: list[EvidenceItem],
-    windows: list[Window],
-    *,
-    topic: str,
-    compare_mode: bool,
-) -> TrendTheme:
-    relevance = theme_relevance(topic, title, items)
-    min_relevance = 0.5 if len(topic_tokens(topic)) >= 2 else 0.34
-    if relevance < min_relevance:
-        return TrendTheme(
-            title=title,
-            direction="filtered",
-            momentum=0.0,
-            current_count=0,
-            baseline_count=0,
-            source_diversity=0,
-            score=0.0,
-            windows={window.label: 0 for window in windows},
-            sources=[],
-            evidence=[],
-        )
-    counts = {window.label: count_items(items, window) for window in windows}
-    baseline, current, baseline_rate, current_rate, current_window = compute_window_stats(counts, windows, compare_mode)
-    momentum = compute_momentum(baseline_rate, current_rate)
-    direction = classify_direction(baseline, current, momentum, items, current_window)
-    sources = sorted({item.source for item in items})
-    score = (sum(item.score for item in items) * relevance) + (len(sources) * 5) + (momentum * 10)
+def build_theme(title: str, terms: list[str], cluster_items_list: list[EvidenceItem],
+                 buckets: list[Window], compare_windows: list[Window]) -> TrendTheme:
+    bucket_counts = {b.label: count_in_window(cluster_items_list, b) for b in buckets}
+    values = [float(bucket_counts[b.label]) for b in buckets]
+    slope = linear_slope(values)
+    if len(compare_windows) >= 2:
+        baseline_w, current_w = compare_windows[0], compare_windows[-1]
+    else:
+        single = compare_windows[0]
+        mid = single.start + timedelta(days=single.days // 2)
+        baseline_w = Window("baseline", single.start, mid - timedelta(days=1))
+        current_w = Window("current", mid, single.end)
+    baseline = count_in_window(cluster_items_list, baseline_w)
+    current = count_in_window(cluster_items_list, current_w)
+    baseline_rate = baseline / max(1, baseline_w.days)
+    current_rate = current / max(1, current_w.days)
+    momentum = (current_rate - baseline_rate) / max(0.05, baseline_rate)
+    direction = classify_direction(baseline, current, slope, momentum)
+    sources = sorted({e.source for e in cluster_items_list})
+    bucket_mix = dict(Counter(e.bucket for e in cluster_items_list))
+    diversity = len(sources)
+    score = (sum(e.score for e in cluster_items_list) + diversity * 5
+             + max(0.0, momentum) * 10 + max(0.0, slope) * 8)
+    then_quote, now_quote = pick_then_now(cluster_items_list, baseline_w, current_w)
+    top_evidence = sorted(cluster_items_list,
+                          key=lambda e: (e.published_at or date.min, e.score),
+                          reverse=True)[:6]
     return TrendTheme(
-        title=title,
-        direction=direction,
-        momentum=round(momentum, 3),
-        current_count=current,
-        baseline_count=baseline,
-        source_diversity=len(sources),
-        score=round(score, 3),
-        windows=counts,
-        sources=sources,
-        evidence=sorted(items, key=lambda item: item.score, reverse=True)[:5],
+        title=title, direction=direction, slope=round(slope, 3),
+        momentum=round(momentum, 3), current_count=current, baseline_count=baseline,
+        source_diversity=diversity, bucket_mix=bucket_mix, score=round(score, 3),
+        bucket_counts=bucket_counts, sources=sources, evidence=top_evidence,
+        then_quote=then_quote, now_quote=now_quote, terms=terms,
     )
 
 
-def compute_window_stats(
-    counts: dict[str, int],
-    windows: list[Window],
-    compare_mode: bool,
-) -> tuple[int, int, float, float, Window | None]:
-    if not windows:
-        return 0, 0, 0.0, 0.0, None
+def classify_direction(baseline: int, current: int, slope: float, momentum: float) -> str:
+    if baseline == 0 and current >= 2:
+        return "emerging"
+    if baseline >= 2 and current == 0:
+        return "fading"
+    if slope > 0 and momentum > 0.5 and current >= 2:
+        return "rising"
+    if slope < 0 and momentum < -0.4 and baseline >= 2:
+        return "fading"
+    return "stable"
 
-    if compare_mode:
-        baseline_window = windows[0]
-        current_window = windows[-1]
-        baseline = counts[baseline_window.label]
-        current = counts[current_window.label]
-        return (
-            baseline,
-            current,
-            baseline / window_days(baseline_window),
-            current / window_days(current_window),
-            current_window,
+
+def direction_rank(d: str) -> int:
+    return {"emerging": 4, "rising": 3, "stable": 2, "fading": 1}.get(d, 0)
+
+
+def pick_then_now(items: list[EvidenceItem], baseline_w: Window, current_w: Window
+                   ) -> tuple[EvidenceItem | None, EvidenceItem | None]:
+    base_items = [e for e in items if e.published_at and baseline_w.start <= e.published_at <= baseline_w.end]
+    cur_items = [e for e in items if e.published_at and current_w.start <= e.published_at <= current_w.end]
+    then = max(base_items, key=lambda e: e.score, default=None)
+    now = max(cur_items, key=lambda e: e.score, default=None)
+    return then, now
+
+
+_ENTITY_RE = re.compile(r"\b([A-Z][A-Za-z0-9]{1,}(?:\s+[A-Z][A-Za-z0-9]{1,}){0,2})\b")
+
+
+def extract_entities(text: str) -> list[str]:
+    out: list[str] = []
+    for match in _ENTITY_RE.findall(text or ""):
+        cleaned = re.sub(r"\s+", " ", match.strip())
+        if cleaned.lower() in STOPWORDS or len(cleaned) < 3:
+            continue
+        out.append(cleaned)
+    return out
+
+
+def compute_emerging_entities(items: list[EvidenceItem], compare_windows: list[Window]) -> list[dict[str, Any]]:
+    if len(compare_windows) < 2:
+        return []
+    baseline_w, current_w = compare_windows[0], compare_windows[-1]
+    base_counts: Counter[str] = Counter()
+    cur_counts: Counter[str] = Counter()
+    cur_examples: dict[str, EvidenceItem] = {}
+    for e in items:
+        if not e.published_at:
+            continue
+        ents = extract_entities(f"{e.title} {e.body}")
+        if baseline_w.start <= e.published_at <= baseline_w.end:
+            base_counts.update(ents)
+        if current_w.start <= e.published_at <= current_w.end:
+            cur_counts.update(ents)
+            for ent in ents:
+                cur_examples.setdefault(ent, e)
+    out = []
+    for ent, count in cur_counts.most_common():
+        if count < 2 or base_counts[ent] > 0:
+            continue
+        ex = cur_examples.get(ent)
+        out.append({"entity": ent, "current_count": count,
+                    "example": serialize_evidence(ex) if ex else None})
+        if len(out) >= 15:
+            break
+    return out
+
+
+def compute_vocabulary_drift(items: list[EvidenceItem], compare_windows: list[Window]) -> list[dict[str, Any]]:
+    if len(compare_windows) < 2:
+        return []
+    baseline_w, current_w = compare_windows[0], compare_windows[-1]
+
+    def normalize(counter: Counter[str]) -> dict[str, float]:
+        total = sum(counter.values()) or 1
+        return {k: v / total for k, v in counter.items()}
+
+    base_terms: Counter[str] = Counter()
+    cur_terms: Counter[str] = Counter()
+    cur_examples: dict[str, EvidenceItem] = {}
+    for e in items:
+        if not e.published_at:
+            continue
+        toks = tokenize(e.text)
+        bigrams = [" ".join(toks[i:i + 2]) for i in range(len(toks) - 1)]
+        all_terms = toks + bigrams
+        if baseline_w.start <= e.published_at <= baseline_w.end:
+            base_terms.update(all_terms)
+        if current_w.start <= e.published_at <= current_w.end:
+            cur_terms.update(all_terms)
+            for term in all_terms:
+                cur_examples.setdefault(term, e)
+    base_norm = normalize(base_terms)
+    cur_norm = normalize(cur_terms)
+    drift: list[tuple[str, float, int, int]] = []
+    for term, cur_freq in cur_norm.items():
+        if cur_terms[term] < 3:
+            continue
+        base_freq = base_norm.get(term, 0.0)
+        lift = math.log((cur_freq + 1e-6) / (base_freq + 1e-6))
+        if lift <= 0.5:
+            continue
+        drift.append((term, lift, cur_terms[term], base_terms.get(term, 0)))
+    drift.sort(key=lambda t: t[1], reverse=True)
+    out = []
+    for term, lift, cur_count, base_count in drift[:20]:
+        ex = cur_examples.get(term)
+        out.append({
+            "term": term, "lift": round(lift, 3),
+            "current_count": cur_count, "baseline_count": base_count,
+            "example": serialize_evidence(ex) if ex else None,
+        })
+    return out
+
+
+def compute_inflection_moments(items: list[EvidenceItem], buckets: list[Window]) -> list[InflectionMoment]:
+    if len(buckets) < 3:
+        return []
+    counts = [count_in_window(items, b) for b in buckets]
+    moments: list[InflectionMoment] = []
+    for i in range(1, len(buckets)):
+        prior = counts[i - 1]
+        cur = counts[i]
+        if cur < 3:
+            continue
+        lift = (cur - prior) / max(1.0, prior)
+        if lift < 0.5:
+            continue
+        bucket_items = [
+            e for e in items
+            if e.published_at and buckets[i].start <= e.published_at <= buckets[i].end
+        ]
+        headline = max(bucket_items, key=lambda e: e.score, default=None)
+        moments.append(InflectionMoment(
+            bucket_label=buckets[i].label, bucket_start=buckets[i].start.isoformat(),
+            bucket_end=buckets[i].end.isoformat(), prior_count=prior,
+            bucket_count=cur, lift=round(lift, 3), headline=headline,
+        ))
+    moments.sort(key=lambda m: m.lift, reverse=True)
+    return moments[:3]
+
+
+_FORWARD_MARKERS = re.compile(
+    r"\b(will|by 20\d{2}|expects?|predicts?|forecast(?:s|ed)?|roadmap|rfc|projection|likely to|set to|plans? to)\b",
+    re.IGNORECASE,
+)
+
+
+def collect_forward_signals(items: list[EvidenceItem]) -> list[EvidenceItem]:
+    out: list[EvidenceItem] = []
+    for e in items:
+        if e.bucket == "forecasts" or e.source.lower() == "polymarket":
+            out.append(e)
+            continue
+        if _FORWARD_MARKERS.search(e.text):
+            out.append(e)
+    out.sort(key=lambda e: (e.published_at or date.min, e.score), reverse=True)
+    return out
+
+
+def serialize_window(w: Window) -> dict[str, str]:
+    return {"label": w.label, "start": w.start.isoformat(), "end": w.end.isoformat()}
+
+
+def serialize_evidence(item: EvidenceItem | None) -> dict[str, Any] | None:
+    if item is None:
+        return None
+    return {
+        "id": item.id, "source": item.source, "bucket": item.bucket,
+        "title": item.title, "url": item.url,
+        "published_at": item.published_at.isoformat() if item.published_at else "",
+        "score": round(item.score, 3), "snippet": item.body[:320],
+    }
+
+
+def serialize_theme(theme: TrendTheme) -> dict[str, Any]:
+    return {
+        "title": theme.title, "direction": theme.direction,
+        "slope": theme.slope, "momentum": theme.momentum,
+        "current_count": theme.current_count, "baseline_count": theme.baseline_count,
+        "source_diversity": theme.source_diversity, "bucket_mix": theme.bucket_mix,
+        "evidence_count": len(theme.evidence), "score": theme.score,
+        "bucket_counts": theme.bucket_counts, "sources": theme.sources,
+        "terms": theme.terms,
+        "then": serialize_evidence(theme.then_quote),
+        "now": serialize_evidence(theme.now_quote),
+        "evidence": [serialize_evidence(e) for e in theme.evidence],
+    }
+
+
+def serialize_inflection(m: InflectionMoment) -> dict[str, Any]:
+    return {
+        "bucket_label": m.bucket_label, "start": m.bucket_start, "end": m.bucket_end,
+        "prior_count": m.prior_count, "count": m.bucket_count,
+        "lift": m.lift, "headline": serialize_evidence(m.headline),
+    }
+
+
+def coverage_notes(items: list[EvidenceItem], had_agent_web: bool) -> list[str]:
+    notes: list[str] = []
+    active_sources = sorted({e.source for e in items})
+    active_buckets = sorted({e.bucket for e in items})
+    if not items:
+        notes.append("No evidence returned. Check last30days credentials or supply --agent-web-file.")
+        return notes
+    if len(active_sources) <= 2:
+        notes.append("Only " + ", ".join(active_sources) + " returned evidence. Source diversity is low.")
+    missing_buckets = [b for b in ("research", "implementations", "adoption", "criticism", "forecasts")
+                       if b not in active_buckets]
+    if missing_buckets:
+        notes.append(
+            "Evidence buckets missing: " + ", ".join(missing_buckets)
+            + ". Have the host agent populate these via --agent-web-file."
         )
+    if not had_agent_web:
+        notes.append("No agent-web evidence file was provided. Trender is running on community signal only.")
+    return notes
 
-    if len(windows) == 1:
-        current = counts[windows[0].label]
-        return 0, current, 0.0, current / window_days(windows[0]), windows[0]
 
-    midpoint = max(1, len(windows) // 2)
-    baseline_windows = windows[:midpoint]
-    current_windows = windows[midpoint:]
-    baseline = sum(counts[window.label] for window in baseline_windows)
-    current = sum(counts[window.label] for window in current_windows)
-    baseline_days = sum(window_days(window) for window in baseline_windows)
-    current_days = sum(window_days(window) for window in current_windows)
-    current_window = Window("recent half", current_windows[0].start, current_windows[-1].end)
-    return (
-        baseline,
-        current,
-        baseline / max(1, baseline_days),
-        current / max(1, current_days),
-        current_window,
+def render_markdown(payload: dict[str, Any], *, html_path: Path | None = None,
+                     json_path: Path | None = None) -> str:
+    lines: list[str] = []
+    lines.append(f"trender v{payload['version']} - analyzed {payload['generated_at'][:10]}")
+    lines.append("")
+    lines.append(f"# Trend report: {payload['topic']}")
+    lines.append("")
+    w = payload["window"]
+    lines.append(
+        f"Window: {w['start']} to {w['end']} - retrieval lookback {payload['retrieval_days']}d - "
+        f"{payload['source_count']} evidence items"
+    )
+    if payload["compare_windows"]:
+        lines.append("Comparison: " + " vs ".join(c["label"] for c in payload["compare_windows"]))
+    lines.append("")
+
+    by_dir: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for t in payload["themes"]:
+        by_dir[t["direction"]].append(t)
+
+    if payload.get("inflection_moments"):
+        lines.append("## Inflection moments")
+        for m in payload["inflection_moments"]:
+            head = m.get("headline") or {}
+            lines.append(
+                f"- **{m['start']} to {m['end']}** - {m['prior_count']} -> {m['count']} items "
+                f"(+{int(m['lift'] * 100)}%)"
+            )
+            if head.get("url"):
+                lines.append(f"  - {head['source']}: [{head['title']}]({head['url']})")
+        lines.append("")
+
+    for section, label in (("emerging", "Emerging"), ("rising", "Accelerating"), ("fading", "Fading")):
+        themes_in = by_dir.get(section, [])
+        if not themes_in:
+            continue
+        lines.append(f"## {label} themes")
+        for theme in themes_in:
+            lines.extend(render_theme_md(theme))
+        lines.append("")
+
+    if by_dir.get("stable"):
+        lines.append("## Stable themes")
+        for theme in by_dir["stable"][:5]:
+            lines.extend(render_theme_md(theme, compact=True))
+        lines.append("")
+
+    if payload.get("emerging_entities"):
+        lines.append("## New names in the conversation")
+        for ent in payload["emerging_entities"][:10]:
+            ex = ent.get("example") or {}
+            tail = f" - example: [{ex.get('title', '')}]({ex.get('url', '')})" if ex.get("url") else ""
+            lines.append(f"- **{ent['entity']}** ({ent['current_count']}x){tail}")
+        lines.append("")
+
+    if payload.get("vocabulary_drift"):
+        lines.append("## Vocabulary drift")
+        for term in payload["vocabulary_drift"][:12]:
+            lines.append(
+                f"- **{term['term']}** - lift {term['lift']} "
+                f"(baseline {term['baseline_count']} -> current {term['current_count']})"
+            )
+        lines.append("")
+
+    if payload.get("forward_signals"):
+        lines.append("## Forward signals")
+        for sig in payload["forward_signals"][:8]:
+            if sig and sig.get("url"):
+                lines.append(f"- {sig.get('published_at', '')} - {sig['source']}: [{sig['title']}]({sig['url']})")
+        lines.append("")
+
+    counts = payload.get("source_counts", {})
+    if counts:
+        lines.append("## Source coverage")
+        lines.append(", ".join(f"{s}={c}" for s, c in sorted(counts.items(), key=lambda x: x[1], reverse=True)))
+        lines.append("")
+    bcounts = payload.get("bucket_counts", {})
+    if bcounts:
+        lines.append("Bucket mix: " + ", ".join(
+            f"{s}={c}" for s, c in sorted(bcounts.items(), key=lambda x: x[1], reverse=True)
+        ))
+        lines.append("")
+
+    for note in payload.get("coverage_notes", []):
+        lines.append(f"> Coverage: {note}")
+    if html_path:
+        lines.append("")
+        lines.append(f"HTML trend map: {html_path}")
+    if json_path:
+        lines.append(f"JSON data: {json_path}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_theme_md(theme: dict[str, Any], *, compact: bool = False) -> list[str]:
+    lines = [
+        f"### {theme['title']} - {theme['direction']}",
+        f"slope {theme['slope']} - momentum {theme['momentum']} - "
+        f"baseline {theme['baseline_count']} -> current {theme['current_count']} - "
+        f"sources {theme['source_diversity']}",
+    ]
+    if compact:
+        return lines + [""]
+    then = theme.get("then")
+    now = theme.get("now")
+    if then or now:
+        lines.append("")
+        lines.append("_Then -> Now_")
+        if then:
+            lines.append(f"- **{then['published_at']}** - {then['source']}: \"{then['title']}\"")
+        if now:
+            lines.append(f"- **{now['published_at']}** - {now['source']}: \"{now['title']}\"")
+    if theme.get("evidence"):
+        lines.append("")
+        lines.append("_Evidence_")
+        for ev in theme["evidence"][:3]:
+            if ev and ev.get("url"):
+                lines.append(f"- {ev.get('published_at', '')} - {ev['source']}: [{ev['title']}]({ev['url']})")
+    lines.append("")
+    return lines
+
+
+
+
+def render_html(payload: dict[str, Any]) -> str:
+    """Render a modern, interactive trend map.
+
+    The page is fully self-contained (CSS + small vanilla-JS bundle inline).
+    The complete trend payload is embedded in a JSON island; the bundle
+    reads it and renders direction filtering, search, sparklines, and
+    smooth scroll navigation on top of it.
+    """
+    themes = payload.get("themes", [])
+    by_dir: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for t in themes:
+        by_dir[t.get("direction", "stable")].append(t)
+
+    direction_counts = {d: len(by_dir.get(d, [])) for d in ("emerging", "rising", "stable", "fading")}
+    payload_json = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
+
+    return MODERN_TEMPLATE.format(
+        topic=escape(payload["topic"]),
+        version=escape(payload["version"]),
+        generated_at=escape(payload["generated_at"]),
+        generated_short=escape(payload["generated_at"][:10]),
+        window_start=escape(payload["window"]["start"]),
+        window_end=escape(payload["window"]["end"]),
+        retrieval_days=payload["retrieval_days"],
+        source_count=payload["source_count"],
+        n_themes=len(themes),
+        n_entities=len(payload.get("emerging_entities", [])),
+        n_inflections=len(payload.get("inflection_moments", [])),
+        n_vocab=len(payload.get("vocabulary_drift", [])),
+        n_forward=len(payload.get("forward_signals", [])),
+        n_emerging=direction_counts["emerging"],
+        n_rising=direction_counts["rising"],
+        n_stable=direction_counts["stable"],
+        n_fading=direction_counts["fading"],
+        comparison_label=escape(
+            " vs ".join(c["label"] for c in payload.get("compare_windows", []))
+            or "single window"
+        ),
+        payload_json=payload_json,
     )
 
 
-def split_window(window: Window) -> list[Window]:
-    days = max(1, (window.end - window.start).days + 1)
-    bucket_days = 1 if days <= 14 else 3 if days <= 45 else 7 if days <= 180 else 30
-    buckets = []
-    current = window.start
-    while current <= window.end:
-        bucket_end = min(window.end, current + timedelta(days=bucket_days - 1))
-        label = current.isoformat() if bucket_days == 1 else f"{current.isoformat()}..{bucket_end.isoformat()}"
-        buckets.append(Window(label, current, bucket_end))
-        current = bucket_end + timedelta(days=1)
-    return buckets
+MODERN_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trender · {topic}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {{
+  --bg: #06080f;
+  --bg-elev: #0d1220;
+  --bg-card: rgba(20, 26, 44, 0.7);
+  --border: rgba(148, 163, 184, 0.12);
+  --border-strong: rgba(148, 163, 184, 0.24);
+  --text: #e8ecf5;
+  --text-dim: #94a3b8;
+  --text-muted: #64748b;
+  --accent: #67e8f9;
+  --accent-2: #a78bfa;
+  --emerging: #34d399;
+  --rising: #60a5fa;
+  --fading: #f87171;
+  --stable: #94a3b8;
+  --radius: 14px;
+  --radius-lg: 22px;
+  --shadow: 0 1px 0 rgba(255,255,255,0.03) inset, 0 8px 24px rgba(0,0,0,0.32);
+}}
+* {{ box-sizing: border-box; }}
+html, body {{ margin: 0; padding: 0; }}
+body {{
+  background: var(--bg);
+  background-image:
+    radial-gradient(1200px 600px at 10% -10%, rgba(103, 232, 249, 0.08), transparent 60%),
+    radial-gradient(1000px 600px at 90% -20%, rgba(167, 139, 250, 0.07), transparent 60%);
+  color: var(--text);
+  font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+  line-height: 1.5;
+  min-height: 100vh;
+}}
+.mono {{ font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }}
+a {{ color: var(--accent); text-decoration: none; transition: color .15s ease; }}
+a:hover {{ color: #a5f3fc; }}
+
+/* layout */
+.container {{ max-width: 1240px; margin: 0 auto; padding: 28px 28px 80px; }}
+.topbar {{
+  position: sticky; top: 0; z-index: 50;
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  background: rgba(6, 8, 15, 0.72);
+  border-bottom: 1px solid var(--border);
+}}
+.topbar-inner {{
+  max-width: 1240px; margin: 0 auto; padding: 12px 28px;
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+}}
+.brand {{ display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: -0.01em; }}
+.brand-dot {{
+  width: 10px; height: 10px; border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  box-shadow: 0 0 16px rgba(103, 232, 249, 0.6);
+}}
+.brand-version {{ color: var(--text-muted); font-weight: 500; font-size: 12px; }}
+.nav {{ display: flex; gap: 4px; flex-wrap: wrap; margin-left: auto; }}
+.nav a {{
+  padding: 6px 12px; border-radius: 999px; color: var(--text-dim);
+  font-size: 13px; font-weight: 500;
+  transition: background .15s ease, color .15s ease;
+}}
+.nav a:hover {{ background: rgba(255,255,255,.04); color: var(--text); }}
+
+/* hero */
+.hero {{ padding: 56px 0 36px; }}
+.eyebrow {{
+  display: inline-flex; align-items: center; gap: 8px;
+  color: var(--text-dim); font-size: 12px; font-weight: 600;
+  letter-spacing: 0.18em; text-transform: uppercase;
+  padding: 6px 12px; border: 1px solid var(--border-strong); border-radius: 999px;
+  background: rgba(148, 163, 184, 0.04);
+}}
+.eyebrow .pulse {{
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 0 rgba(103, 232, 249, 0.7);
+  animation: pulse 2.4s ease-out infinite;
+}}
+@keyframes pulse {{
+  0% {{ box-shadow: 0 0 0 0 rgba(103, 232, 249, 0.5); }}
+  70% {{ box-shadow: 0 0 0 12px rgba(103, 232, 249, 0); }}
+  100% {{ box-shadow: 0 0 0 0 rgba(103, 232, 249, 0); }}
+}}
+h1 {{
+  font-size: clamp(40px, 7vw, 76px);
+  line-height: 1.0; letter-spacing: -0.035em;
+  font-weight: 800; margin: 18px 0 16px;
+  background: linear-gradient(180deg, #ffffff 0%, #cbd5e1 100%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}}
+.hero-sub {{ color: var(--text-dim); font-size: 16px; max-width: 760px; }}
+.hero-meta {{
+  display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; align-items: center;
+}}
+.tag {{
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; padding: 5px 10px; border-radius: 8px;
+  background: rgba(148,163,184,.08); color: var(--text-dim);
+  border: 1px solid var(--border);
+}}
+.tag strong {{ color: var(--text); font-weight: 600; }}
+
+/* metric grid */
+.metrics {{
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 36px;
+}}
+.metric {{
+  position: relative; padding: 18px 18px 16px; border-radius: var(--radius);
+  background: var(--bg-card); border: 1px solid var(--border);
+  overflow: hidden;
+}}
+.metric::before {{
+  content: ''; position: absolute; inset: 0;
+  background: radial-gradient(400px 80px at 100% 0%, rgba(103,232,249,.06), transparent 60%);
+  pointer-events: none;
+}}
+.metric .label {{
+  font-size: 11px; text-transform: uppercase; letter-spacing: .12em; color: var(--text-muted);
+}}
+.metric .value {{
+  font-size: 36px; font-weight: 700; letter-spacing: -0.02em; margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}}
+.metric .delta {{ font-size: 12px; color: var(--text-dim); margin-top: 4px; }}
+
+/* section */
+section.block {{ margin-top: 56px; scroll-margin-top: 80px; }}
+.block-head {{
+  display: flex; align-items: baseline; justify-content: space-between;
+  margin-bottom: 18px; gap: 16px; flex-wrap: wrap;
+}}
+.block-head h2 {{
+  font-size: 24px; letter-spacing: -0.02em; margin: 0; font-weight: 700;
+}}
+.block-head .hint {{ color: var(--text-muted); font-size: 13px; }}
+
+/* inflections strip */
+.inflection-grid {{
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px;
+}}
+.inflection {{
+  padding: 18px; border-radius: var(--radius); border: 1px solid var(--border);
+  background: linear-gradient(160deg, rgba(103,232,249,.06), rgba(167,139,250,.04) 60%, transparent);
+  transition: transform .2s ease, border-color .2s ease;
+}}
+.inflection:hover {{ transform: translateY(-2px); border-color: var(--border-strong); }}
+.inflection .when {{ color: var(--accent); font-size: 12px; font-weight: 600; letter-spacing: .04em; }}
+.inflection .lift {{
+  font-size: 32px; font-weight: 700; margin: 8px 0 6px; letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}}
+.inflection .lift small {{ font-size: 13px; color: var(--text-dim); font-weight: 500; }}
+.inflection .head a {{ color: var(--text); font-size: 14px; font-weight: 500; }}
+.inflection .head a:hover {{ color: var(--accent); }}
+
+/* filter chips */
+.filterbar {{
+  display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 16px;
+}}
+.chip {{
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 8px 14px; border-radius: 999px;
+  background: var(--bg-card); border: 1px solid var(--border);
+  color: var(--text-dim); font-size: 13px; font-weight: 500;
+  cursor: pointer; user-select: none;
+  transition: all .15s ease;
+}}
+.chip:hover {{ border-color: var(--border-strong); color: var(--text); }}
+.chip[data-active="true"] {{ background: rgba(103,232,249,.1); border-color: rgba(103,232,249,.5); color: var(--text); }}
+.chip .swatch {{ width: 8px; height: 8px; border-radius: 50%; }}
+.chip[data-direction="emerging"] .swatch {{ background: var(--emerging); }}
+.chip[data-direction="rising"] .swatch {{ background: var(--rising); }}
+.chip[data-direction="stable"] .swatch {{ background: var(--stable); }}
+.chip[data-direction="fading"] .swatch {{ background: var(--fading); }}
+.chip .count {{ color: var(--text-muted); font-variant-numeric: tabular-nums; }}
+.search {{
+  flex: 1 1 220px; max-width: 360px; min-width: 200px; margin-left: auto;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 999px;
+  padding: 8px 14px; color: var(--text); font-size: 13px;
+  transition: border-color .15s ease, background .15s ease;
+}}
+.search:focus {{ outline: none; border-color: var(--accent); background: rgba(103,232,249,.04); }}
+
+/* theme cards */
+.theme-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 14px; }}
+.theme-card {{
+  position: relative;
+  padding: 18px; border-radius: var(--radius);
+  background: var(--bg-card); border: 1px solid var(--border);
+  transition: transform .2s ease, border-color .2s ease, box-shadow .2s ease;
+  display: flex; flex-direction: column; gap: 12px;
+}}
+.theme-card:hover {{
+  transform: translateY(-2px); border-color: var(--border-strong);
+  box-shadow: var(--shadow);
+}}
+.theme-card.hidden {{ display: none; }}
+.theme-card .topline {{
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}}
+.dir-badge {{
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+  padding: 4px 10px; border-radius: 6px;
+}}
+.dir-badge[data-direction="emerging"] {{ background: rgba(52,211,153,.12); color: var(--emerging); }}
+.dir-badge[data-direction="rising"]   {{ background: rgba(96,165,250,.12); color: var(--rising); }}
+.dir-badge[data-direction="fading"]   {{ background: rgba(248,113,113,.12); color: var(--fading); }}
+.dir-badge[data-direction="stable"]   {{ background: rgba(148,163,184,.12); color: var(--stable); }}
+.dir-badge .swatch {{ width: 6px; height: 6px; border-radius: 50%; background: currentColor; }}
+.theme-card h3 {{
+  font-size: 18px; font-weight: 600; margin: 0;
+  letter-spacing: -0.015em; line-height: 1.3;
+}}
+.kpis {{
+  display: flex; gap: 18px; align-items: center; color: var(--text-dim); font-size: 12px;
+}}
+.kpis .kpi {{ display: flex; flex-direction: column; gap: 2px; }}
+.kpis .kpi b {{ color: var(--text); font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }}
+.movement {{
+  display: inline-flex; align-items: center; gap: 12px;
+  font-variant-numeric: tabular-nums;
+}}
+.movement .from, .movement .to {{
+  background: rgba(255,255,255,.04); padding: 6px 12px; border-radius: 8px;
+  font-weight: 600; font-size: 18px;
+}}
+.movement .arrow {{ color: var(--accent); font-weight: 700; }}
+.spark {{
+  position: relative; height: 64px; border-radius: 10px;
+  background: rgba(2,6,23,.6); border: 1px solid var(--border);
+  overflow: hidden;
+}}
+.quote-pair {{ display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }}
+.quote {{
+  padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,.025);
+  border-left: 2px solid var(--text-muted);
+  font-size: 13px;
+}}
+.quote.then {{ border-left-color: var(--text-dim); }}
+.quote.now  {{ border-left-color: var(--accent); }}
+.quote .qlabel {{
+  color: var(--text-muted); font-size: 10px; text-transform: uppercase;
+  letter-spacing: .12em; margin-bottom: 4px;
+}}
+.quote a {{ color: var(--text); font-weight: 500; }}
+.quote a:hover {{ color: var(--accent); }}
+.quote p {{ color: var(--text-dim); font-size: 12px; margin: 4px 0 0; line-height: 1.45; }}
+details.evidence {{ margin-top: 4px; }}
+details.evidence summary {{
+  cursor: pointer; color: var(--text-dim); font-size: 12px; padding: 6px 0;
+  list-style: none;
+}}
+details.evidence summary::-webkit-details-marker {{ display: none; }}
+details.evidence summary::after {{ content: ' ›'; transition: transform .2s ease; display: inline-block; }}
+details.evidence[open] summary::after {{ transform: rotate(90deg); }}
+details.evidence ul {{ list-style: none; padding: 0; margin: 8px 0 0; }}
+details.evidence li {{
+  padding: 8px 0; border-top: 1px solid var(--border); font-size: 13px;
+}}
+details.evidence li .meta {{ color: var(--text-muted); font-size: 11px; }}
+details.evidence li a {{ color: var(--text); font-weight: 500; display: block; margin: 2px 0; }}
+details.evidence li a:hover {{ color: var(--accent); }}
+details.evidence li p {{ color: var(--text-dim); font-size: 12px; margin: 2px 0 0; }}
+
+/* entity / vocab */
+.tag-grid {{ display: flex; flex-wrap: wrap; gap: 8px; }}
+.entity {{
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 6px 12px; border-radius: 8px;
+  background: rgba(167,139,250,.08); border: 1px solid rgba(167,139,250,.18);
+  color: var(--text); font-size: 13px; font-weight: 500;
+  transition: all .15s ease;
+}}
+.entity:hover {{ background: rgba(167,139,250,.14); transform: translateY(-1px); }}
+.entity .count {{ color: var(--text-dim); font-size: 11px; font-variant-numeric: tabular-nums; }}
+
+table.vocab {{
+  width: 100%; border-collapse: collapse; font-size: 13px;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+  overflow: hidden;
+}}
+table.vocab thead {{
+  background: rgba(255,255,255,.02);
+}}
+table.vocab th {{
+  text-align: left; padding: 10px 14px; font-weight: 600; color: var(--text-dim);
+  font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+}}
+table.vocab td {{ padding: 10px 14px; border-top: 1px solid var(--border); }}
+table.vocab td:first-child {{ font-weight: 600; }}
+table.vocab .lift-bar {{
+  display: inline-block; height: 4px; border-radius: 2px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  vertical-align: middle; margin-right: 8px;
+}}
+
+/* aside / coverage */
+.layout {{ display: grid; grid-template-columns: 1fr 320px; gap: 24px; align-items: start; margin-top: 24px; }}
+@media (max-width: 980px) {{ .layout {{ grid-template-columns: 1fr; }} }}
+.aside-card {{
+  padding: 18px; border-radius: var(--radius);
+  background: var(--bg-card); border: 1px solid var(--border);
+  margin-bottom: 14px;
+}}
+.aside-card h3 {{
+  margin: 0 0 12px; font-size: 12px; text-transform: uppercase;
+  letter-spacing: .12em; color: var(--text-dim); font-weight: 600;
+}}
+.bar-row {{
+  display: grid; grid-template-columns: 100px 1fr 30px;
+  align-items: center; gap: 10px; margin: 8px 0;
+  font-size: 12px;
+}}
+.bar-row .label {{ color: var(--text-dim); }}
+.bar-track {{
+  height: 6px; border-radius: 999px; background: rgba(148,163,184,.12); overflow: hidden;
+}}
+.bar-fill {{
+  height: 100%; border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width .8s cubic-bezier(.2,.8,.2,1);
+}}
+.bar-row strong {{ text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }}
+.notes {{ list-style: none; padding: 0; margin: 0; }}
+.notes li {{
+  padding: 10px 12px; border-radius: 10px; margin-bottom: 8px;
+  background: rgba(251,191,36,.05); border: 1px solid rgba(251,191,36,.18);
+  color: #fde68a; font-size: 12px; line-height: 1.5;
+}}
+
+/* responsive */
+@media (max-width: 720px) {{
+  .metrics {{ grid-template-columns: 1fr 1fr; }}
+  .quote-pair {{ grid-template-columns: 1fr; }}
+  .nav {{ display: none; }}
+  .hero {{ padding: 32px 0 24px; }}
+}}
+
+/* utility */
+.empty {{ color: var(--text-muted); font-style: italic; padding: 12px 0; }}
+
+/* fade-in stagger */
+@keyframes fadein {{
+  from {{ opacity: 0; transform: translateY(8px); }}
+  to   {{ opacity: 1; transform: translateY(0); }}
+}}
+.theme-card, .inflection, .metric, .entity {{
+  animation: fadein .4s ease both;
+}}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <span class="brand-dot"></span>
+      Trender
+      <span class="brand-version mono">v{version}</span>
+    </div>
+    <nav class="nav">
+      <a href="#inflections">Inflections</a>
+      <a href="#themes">Themes</a>
+      <a href="#entities">Entities</a>
+      <a href="#vocab">Vocabulary</a>
+      <a href="#forward">Forward</a>
+      <a href="#coverage">Coverage</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container">
+
+  <section class="hero">
+    <span class="eyebrow"><span class="pulse"></span> Trend report · {generated_short}</span>
+    <h1>{topic}</h1>
+    <p class="hero-sub">How this topic moved across <strong>{retrieval_days} days</strong> of evidence — comparing <span class="mono">{comparison_label}</span>.</p>
+    <div class="hero-meta">
+      <span class="tag"><strong>{window_start}</strong> → <strong>{window_end}</strong></span>
+      <span class="tag">window</span>
+      <span class="tag"><strong>{source_count}</strong> evidence items</span>
+    </div>
+
+    <div class="metrics">
+      <div class="metric">
+        <div class="label">Themes</div>
+        <div class="value" data-counter="{n_themes}">{n_themes}</div>
+        <div class="delta">{n_emerging} emerging · {n_rising} rising · {n_stable} stable · {n_fading} fading</div>
+      </div>
+      <div class="metric">
+        <div class="label">Inflections</div>
+        <div class="value" data-counter="{n_inflections}">{n_inflections}</div>
+        <div class="delta">moments of acceleration</div>
+      </div>
+      <div class="metric">
+        <div class="label">New names</div>
+        <div class="value" data-counter="{n_entities}">{n_entities}</div>
+        <div class="delta">entities new to current window</div>
+      </div>
+      <div class="metric">
+        <div class="label">Vocabulary shifts</div>
+        <div class="value" data-counter="{n_vocab}">{n_vocab}</div>
+        <div class="delta">terms with significant lift</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="inflections" class="block">
+    <div class="block-head">
+      <h2>Inflection moments</h2>
+      <span class="hint">weeks where volume jumped vs the prior week</span>
+    </div>
+    <div id="inflection-grid" class="inflection-grid"></div>
+  </section>
+
+  <section id="themes" class="block">
+    <div class="block-head">
+      <h2>Themes</h2>
+      <span class="hint">click a chip to filter · search to narrow further</span>
+    </div>
+    <div class="filterbar" id="filterbar"></div>
+    <div id="theme-grid" class="theme-grid"></div>
+  </section>
+
+  <div class="layout">
+    <div>
+
+      <section id="entities" class="block">
+        <div class="block-head">
+          <h2>New names in the conversation</h2>
+          <span class="hint">capitalized n-grams new to the current window</span>
+        </div>
+        <div id="entity-grid" class="tag-grid"></div>
+      </section>
+
+      <section id="vocab" class="block">
+        <div class="block-head">
+          <h2>Vocabulary drift</h2>
+          <span class="hint">terms with biggest baseline → current frequency lift</span>
+        </div>
+        <div id="vocab-table"></div>
+      </section>
+
+      <section id="forward" class="block">
+        <div class="block-head">
+          <h2>Forward signals</h2>
+          <span class="hint">predictions, roadmaps, forecasts, betting markets</span>
+        </div>
+        <div id="forward-list"></div>
+      </section>
+
+    </div>
+
+    <aside id="coverage">
+      <section class="block aside" style="margin-top:0">
+        <div class="aside-card">
+          <h3>Source coverage</h3>
+          <div id="source-bars"></div>
+        </div>
+        <div class="aside-card">
+          <h3>Bucket mix</h3>
+          <div id="bucket-chips" class="tag-grid"></div>
+        </div>
+        <div class="aside-card">
+          <h3>Coverage notes</h3>
+          <ul id="coverage-notes" class="notes"></ul>
+        </div>
+      </section>
+    </aside>
+  </div>
+
+</main>
+
+<script id="trender-data" type="application/json">{payload_json}</script>
+<script>
+(function() {{
+  const dataEl = document.getElementById('trender-data');
+  const data = JSON.parse(dataEl.textContent);
+  const buckets = data.buckets || [];
+  const themes = data.themes || [];
+
+  const escapeHtml = (s) => String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+  const fmt = (n) => Number.isFinite(n) ? n.toLocaleString() : '0';
+
+  // sparkline as SVG area chart
+  function sparkline(values) {{
+    if (!values || !values.length) return '';
+    const w = 320, h = 64, pad = 4;
+    const n = values.length;
+    const max = Math.max(1, ...values);
+    const step = n > 1 ? (w - pad * 2) / (n - 1) : 0;
+    const points = values.map((v, i) => {{
+      const x = pad + i * step;
+      const y = h - pad - (v / max) * (h - pad * 2);
+      return [x, y];
+    }});
+    const linePath = points.map((p, i) => (i === 0 ? 'M' : 'L') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' ');
+    const areaPath = linePath + ' L ' + points[n-1][0].toFixed(1) + ' ' + (h - pad) + ' L ' + points[0][0].toFixed(1) + ' ' + (h - pad) + ' Z';
+    const dots = points.map((p, i) =>
+      `<circle cx="${{p[0].toFixed(1)}}" cy="${{p[1].toFixed(1)}}" r="2" fill="#67e8f9" opacity="${{values[i] > 0 ? 1 : 0.3}}"/>`
+    ).join('');
+    return `<svg viewBox="0 0 ${{w}} ${{h}}" preserveAspectRatio="none" width="100%" height="${{h}}">
+      <defs>
+        <linearGradient id="sg" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#67e8f9" stop-opacity="0.35"/>
+          <stop offset="100%" stop-color="#67e8f9" stop-opacity="0"/>
+        </linearGradient>
+      </defs>
+      <path d="${{areaPath}}" fill="url(#sg)" stroke="none"/>
+      <path d="${{linePath}}" fill="none" stroke="#67e8f9" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+      ${{dots}}
+    </svg>`;
+  }}
+
+  // counter animation
+  document.querySelectorAll('[data-counter]').forEach(el => {{
+    const target = parseInt(el.getAttribute('data-counter'), 10) || 0;
+    if (target <= 1) {{ el.textContent = target; return; }}
+    const dur = 600;
+    const start = performance.now();
+    function tick(now) {{
+      const t = Math.min(1, (now - start) / dur);
+      const eased = 1 - Math.pow(1 - t, 3);
+      el.textContent = Math.round(target * eased);
+      if (t < 1) requestAnimationFrame(tick);
+    }}
+    requestAnimationFrame(tick);
+  }});
+
+  // inflection cards
+  const inflectionGrid = document.getElementById('inflection-grid');
+  const moments = data.inflection_moments || [];
+  if (!moments.length) {{
+    inflectionGrid.innerHTML = '<p class="empty">No inflection moments detected — volume is steady across the window.</p>';
+  }} else {{
+    inflectionGrid.innerHTML = moments.map(m => {{
+      const head = m.headline || {{}};
+      const headLink = head.url
+        ? `<a href="${{escapeHtml(head.url)}}" target="_blank" rel="noreferrer">${{escapeHtml(head.title || '')}}</a>`
+        : '<span class="empty">no headline</span>';
+      const pct = Math.round((m.lift || 0) * 100);
+      return `<article class="inflection">
+        <div class="when">${{escapeHtml(m.start)}} → ${{escapeHtml(m.end)}}</div>
+        <div class="lift">+${{pct}}% <small>${{m.prior_count}} → ${{m.count}}</small></div>
+        <div class="head">${{headLink}}</div>
+      </article>`;
+    }}).join('');
+  }}
+
+  // direction filter chips
+  const directions = ['emerging', 'rising', 'stable', 'fading'];
+  const counts = directions.reduce((acc, d) => {{
+    acc[d] = themes.filter(t => t.direction === d).length;
+    return acc;
+  }}, {{}});
+  const filterbar = document.getElementById('filterbar');
+  let activeDirs = new Set(directions.filter(d => counts[d] > 0));
+  filterbar.innerHTML = directions.map(d => `
+    <button class="chip" data-direction="${{d}}" data-active="true">
+      <span class="swatch"></span>
+      <span>${{d}}</span>
+      <span class="count">${{counts[d]}}</span>
+    </button>
+  `).join('') + `<input class="search" id="search" placeholder="search themes & evidence…" />`;
+
+  filterbar.querySelectorAll('.chip').forEach(chip => {{
+    chip.addEventListener('click', () => {{
+      const d = chip.getAttribute('data-direction');
+      if (activeDirs.has(d)) {{ activeDirs.delete(d); chip.dataset.active = 'false'; }}
+      else {{ activeDirs.add(d); chip.dataset.active = 'true'; }}
+      applyFilters();
+    }});
+  }});
+  document.getElementById('search').addEventListener('input', applyFilters);
+
+  // theme cards
+  const themeGrid = document.getElementById('theme-grid');
+  if (!themes.length) {{
+    themeGrid.innerHTML = '<p class="empty">No themes detected. Try a broader window or supply --agent-web-file.</p>';
+  }} else {{
+    themeGrid.innerHTML = themes.map((t, idx) => {{
+      const values = buckets.map(b => (t.bucket_counts || {{}})[b.label] || 0);
+      const then = t.then;
+      const now = t.now;
+      const quotePair = (then || now) ? `<div class="quote-pair">
+        ${{ then ? `<div class="quote then">
+          <div class="qlabel">Then · ${{escapeHtml(then.published_at || '')}}</div>
+          <a href="${{escapeHtml(then.url || '#')}}" target="_blank" rel="noreferrer">${{escapeHtml(then.title || '')}}</a>
+          <p>${{escapeHtml((then.snippet || '').slice(0, 220))}}</p>
+        </div>` : '<div></div>' }}
+        ${{ now ? `<div class="quote now">
+          <div class="qlabel">Now · ${{escapeHtml(now.published_at || '')}}</div>
+          <a href="${{escapeHtml(now.url || '#')}}" target="_blank" rel="noreferrer">${{escapeHtml(now.title || '')}}</a>
+          <p>${{escapeHtml((now.snippet || '').slice(0, 220))}}</p>
+        </div>` : '<div></div>' }}
+      </div>` : '';
+      const evidence = (t.evidence || []).filter(Boolean);
+      const evidenceList = evidence.map(e => `<li>
+        <div class="meta">${{escapeHtml(e.published_at || 'unknown')}} · ${{escapeHtml(e.source || '')}} · ${{escapeHtml(e.bucket || '')}}</div>
+        <a href="${{escapeHtml(e.url || '#')}}" target="_blank" rel="noreferrer">${{escapeHtml(e.title || '')}}</a>
+        <p>${{escapeHtml((e.snippet || '').slice(0, 200))}}</p>
+      </li>`).join('');
+      return `<article class="theme-card" data-direction="${{escapeHtml(t.direction)}}" data-search="${{escapeHtml(((t.title || '') + ' ' + evidence.map(e => (e.title || '') + ' ' + (e.snippet || '')).join(' ')).toLowerCase())}}" style="animation-delay:${{Math.min(idx, 12) * 30}}ms">
+        <div class="topline">
+          <span class="dir-badge" data-direction="${{escapeHtml(t.direction)}}"><span class="swatch"></span>${{escapeHtml(t.direction)}}</span>
+          <span style="color:var(--text-muted);font-size:12px" class="mono">slope ${{t.slope}} · momentum ${{t.momentum}}</span>
+        </div>
+        <h3>${{escapeHtml(t.title || 'Untitled')}}</h3>
+        <div class="kpis">
+          <div class="movement">
+            <span class="from">${{t.baseline_count || 0}}</span>
+            <span class="arrow">→</span>
+            <span class="to">${{t.current_count || 0}}</span>
+          </div>
+          <div class="kpi"><span>sources</span><b>${{t.source_diversity || 0}}</b></div>
+          <div class="kpi"><span>evidence</span><b>${{t.evidence_count || 0}}</b></div>
+        </div>
+        <div class="spark">${{sparkline(values)}}</div>
+        ${{quotePair}}
+        ${{evidence.length ? `<details class="evidence">
+          <summary>Evidence (${{evidence.length}})</summary>
+          <ul>${{evidenceList}}</ul>
+        </details>` : ''}}
+      </article>`;
+    }}).join('');
+  }}
+
+  function applyFilters() {{
+    const q = (document.getElementById('search').value || '').toLowerCase().trim();
+    document.querySelectorAll('#theme-grid .theme-card').forEach(card => {{
+      const dirOk = activeDirs.has(card.dataset.direction);
+      const text = card.dataset.search || '';
+      const searchOk = !q || text.includes(q);
+      card.classList.toggle('hidden', !(dirOk && searchOk));
+    }});
+  }}
+
+  // entities
+  const entityGrid = document.getElementById('entity-grid');
+  const entities = data.emerging_entities || [];
+  if (!entities.length) {{
+    entityGrid.innerHTML = '<p class="empty">No new entities detected.</p>';
+  }} else {{
+    entityGrid.innerHTML = entities.slice(0, 24).map(e => {{
+      const ex = e.example || {{}};
+      const href = ex.url ? escapeHtml(ex.url) : '#';
+      const title = ex.title ? escapeHtml(ex.title) : '';
+      return `<a class="entity" href="${{href}}" target="_blank" rel="noreferrer" title="${{title}}">
+        ${{escapeHtml(e.entity)}}
+        <span class="count">${{e.current_count}}×</span>
+      </a>`;
+    }}).join('');
+  }}
+
+  // vocab table
+  const vocabHost = document.getElementById('vocab-table');
+  const vocab = data.vocabulary_drift || [];
+  if (!vocab.length) {{
+    vocabHost.innerHTML = '<p class="empty">No significant vocabulary drift in this window.</p>';
+  }} else {{
+    const maxLift = Math.max(1, ...vocab.map(v => v.lift || 0));
+    vocabHost.innerHTML = `<table class="vocab">
+      <thead><tr><th>term</th><th>lift</th><th>baseline → current</th><th>example</th></tr></thead>
+      <tbody>${{ vocab.slice(0, 20).map(v => {{
+        const ex = v.example || {{}};
+        const exLink = ex.url
+          ? `<a href="${{escapeHtml(ex.url)}}" target="_blank" rel="noreferrer">${{escapeHtml((ex.title || '').slice(0, 70))}}</a>`
+          : '';
+        const barW = Math.max(20, (v.lift / maxLift) * 100);
+        return `<tr>
+          <td>${{escapeHtml(v.term)}}</td>
+          <td><span class="lift-bar" style="width:${{barW.toFixed(0)}}px"></span>${{v.lift}}</td>
+          <td class="mono">${{v.baseline_count}} → ${{v.current_count}}</td>
+          <td>${{exLink}}</td>
+        </tr>`;
+      }}).join('') }}</tbody>
+    </table>`;
+  }}
+
+  // forward signals
+  const forwardHost = document.getElementById('forward-list');
+  const forward = (data.forward_signals || []).filter(Boolean);
+  if (!forward.length) {{
+    forwardHost.innerHTML = '<p class="empty">No forward signals detected. Populate the forecasts bucket via --agent-web-file.</p>';
+  }} else {{
+    forwardHost.innerHTML = '<ul class="notes" style="list-style:none;padding:0">' + forward.slice(0, 10).map(s => `
+      <li style="background:rgba(96,165,250,.06);border-color:rgba(96,165,250,.2);color:var(--text)">
+        <div style="color:var(--text-muted);font-size:11px;margin-bottom:4px">${{escapeHtml(s.published_at || 'unknown')}} · ${{escapeHtml(s.source || '')}}</div>
+        <a href="${{escapeHtml(s.url || '#')}}" target="_blank" rel="noreferrer">${{escapeHtml(s.title || '')}}</a>
+        <p style="color:var(--text-dim);margin:4px 0 0;font-size:12px">${{escapeHtml((s.snippet || '').slice(0, 220))}}</p>
+      </li>
+    `).join('') + '</ul>';
+  }}
+
+  // source bars
+  const sourceCounts = data.source_counts || {{}};
+  const maxSource = Math.max(1, ...Object.values(sourceCounts));
+  document.getElementById('source-bars').innerHTML = Object.entries(sourceCounts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([s, c]) => `<div class="bar-row">
+      <span class="label">${{escapeHtml(s)}}</span>
+      <div class="bar-track"><div class="bar-fill" style="width:${{(c / maxSource) * 100}}%"></div></div>
+      <strong>${{c}}</strong>
+    </div>`).join('') || '<p class="empty">No sources returned evidence.</p>';
+
+  // bucket chips
+  const bucketCounts = data.bucket_counts || {{}};
+  document.getElementById('bucket-chips').innerHTML = Object.entries(bucketCounts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([b, c]) => `<span class="entity">${{escapeHtml(b)}} <span class="count">${{c}}</span></span>`)
+    .join('') || '<span class="empty">none</span>';
+
+  // coverage notes
+  const notes = data.coverage_notes || [];
+  document.getElementById('coverage-notes').innerHTML =
+    notes.length
+      ? notes.map(n => `<li>${{escapeHtml(n)}}</li>`).join('')
+      : '<li style="background:rgba(52,211,153,.05);border-color:rgba(52,211,153,.2);color:#a7f3d0">All checks passed.</li>';
+
+  // smooth scroll for nav
+  document.querySelectorAll('.nav a').forEach(a => {{
+    a.addEventListener('click', (e) => {{
+      const id = a.getAttribute('href').slice(1);
+      const el = document.getElementById(id);
+      if (el) {{ e.preventDefault(); el.scrollIntoView({{behavior: 'smooth', block: 'start'}}); }}
+    }});
+  }});
+}})();
+</script>
+
+</body>
+</html>"""
+
+
+def mock_evidence(topic: str, primary: Window, compare: list[Window]) -> list[EvidenceItem]:
+    if compare and len(compare) >= 2:
+        baseline_w, current_w = compare[0], compare[-1]
+    else:
+        mid = primary.start + timedelta(days=primary.days // 2)
+        baseline_w = Window("baseline", primary.start, mid)
+        current_w = Window("current", mid + timedelta(days=1), primary.end)
+
+    samples = [
+        (-30, "research", "arxiv", f"{topic}: a survey of recent benchmarks",
+         f"Comprehensive survey of {topic} evaluation methods."),
+        (-15, "implementations", "github", f"open-{topic.lower().replace(' ', '-')}: reference implementation",
+         f"Open source release demonstrating {topic} in practice."),
+        (-5, "community", "reddit", f"r/programming: thoughts on {topic}",
+         f"Discussion thread about {topic} workflows and adoption."),
+        (3, "research", "arxiv", f"new {topic} benchmark released",
+         f"Updated benchmark suite for {topic} with stronger evaluation criteria."),
+        (5, "implementations", "github", f"vendor X ships {topic} integration",
+         f"Major vendor announces production {topic} integration."),
+        (7, "adoption", "agent-web", f"enterprise adoption of {topic} accelerates",
+         f"Survey: 40% of teams now use {topic} in production workflows."),
+        (10, "criticism", "reddit", f"the limits of {topic} in production",
+         f"Practitioners discuss reliability and cost issues with {topic}."),
+        (12, "forecasts", "polymarket", f"market: will {topic} reach 1M users by 2027?",
+         f"Polymarket odds shifted on {topic} adoption forecast."),
+        (14, "community", "hackernews", f"Show HN: {topic} debugger",
+         f"New debugging tool for {topic} workflows. Lots of engagement."),
+        (16, "community", "x", f"viral thread on {topic} pricing",
+         f"Pricing changes around {topic} sparked broad discussion."),
+        (18, "implementations", "github", f"v2.0 of popular {topic} framework",
+         f"Framework v2.0 release with API redesign for {topic}."),
+        (20, "research", "perplexity", f"comparing {topic} approaches",
+         f"Side-by-side comparison of three {topic} architectures."),
+    ]
+    items: list[EvidenceItem] = []
+    for i, (offset, bucket, source, title, body) in enumerate(samples):
+        if offset < 0:
+            published = baseline_w.end + timedelta(days=offset)
+        else:
+            published = current_w.start + timedelta(days=offset)
+        if published > primary.end:
+            published = primary.end
+        if published < primary.start:
+            published = primary.start
+        items.append(EvidenceItem(
+            id=f"mock-{i}", source=source, title=title, body=body,
+            url=f"https://example.com/{slugify(topic)}/{i}",
+            published_at=published, score=20.0 + i, bucket=bucket, raw={},
+        ))
+    return items
+
+
+def resolve_last30days_dir(configured: str | None, skill_dir: Path) -> Path:
+    candidates: list[Path] = []
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    candidates.extend([
+        skill_dir / "vendor" / "last30days",
+        skill_dir.parent / "last30days",
+        Path.home() / ".claude" / "skills" / "last30days",
+        Path.home() / ".codex" / "skills" / "last30days",
+        Path.home() / ".agents" / "skills" / "last30days",
+        Path.home() / ".openclaw" / "skills" / "last30days",
+    ])
+    for candidate in candidates:
+        if (candidate / "scripts" / "last30days.py").exists():
+            return candidate
+    raise SystemExit("Could not find last30days. Set LAST30DAYS_SKILL_DIR or rebuild Trender.")
+
+
+def resolve_python_for_last30days() -> str:
+    configured = os.getenv("TRENDER_LAST30DAYS_PYTHON")
+    candidates = [configured] if configured else []
+    candidates.extend([
+        sys.executable,
+        shutil.which("python3.13"),
+        shutil.which("python3.12"),
+        shutil.which("python3"),
+        shutil.which("python"),
+    ])
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        if python_version_at_least(candidate, 3, 12):
+            return candidate
+    raise SystemExit("last30days requires Python 3.12+. Set TRENDER_LAST30DAYS_PYTHON.")
+
+
+def python_version_at_least(executable: str, major: int, minor: int) -> bool:
+    try:
+        proc = subprocess.run(
+            [executable, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
+        )
+    except OSError:
+        return False
+    if proc.returncode != 0:
+        return False
+    try:
+        parts = proc.stdout.strip().split(".", 1)
+        return (int(parts[0]), int(parts[1])) >= (major, minor)
+    except (ValueError, IndexError):
+        return False
+
+
+def parse_json_from_mixed_output(output: str) -> dict[str, Any]:
+    start = output.find("{")
+    end = output.rfind("}")
+    if start < 0 or end < start:
+        raise SystemExit("last30days did not return JSON output")
+    return json.loads(output[start:end + 1])
+
+
+def parse_date(value: str) -> date:
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError as exc:
+        raise SystemExit(f"Invalid date {value!r}; expected YYYY-MM-DD") from exc
 
 
 def parse_compare(raw: str | None, end: date) -> list[Window]:
     if not raw:
         return []
-    parts = [part.strip() for part in raw.split(",") if part.strip()]
-    if len(parts) != 2 or not all(part.isdigit() for part in parts):
-        raise SystemExit("--compare must be two day counts, e.g. --compare=7,30")
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        raise SystemExit("--compare must be two day counts, e.g. --compare=30,180")
     short_days, long_days = sorted([int(parts[0]), int(parts[1])])
-    if short_days <= 0 or long_days <= 0:
+    if short_days <= 0:
         raise SystemExit("--compare day counts must be positive")
+    baseline_start = end - timedelta(days=long_days - 1)
+    baseline_end = end - timedelta(days=short_days)
+    current_start = end - timedelta(days=short_days - 1)
     return [
-        Window(f"last {long_days}d baseline", end - timedelta(days=long_days - 1), end),
-        Window(f"last {short_days}d current", end - timedelta(days=short_days - 1), end),
+        Window(f"prior {long_days - short_days}d baseline", baseline_start, baseline_end),
+        Window(f"last {short_days}d current", current_start, end),
     ]
 
 
-def count_items(items: list[EvidenceItem], window: Window) -> int:
-    return sum(1 for item in items if item.published_at and window.start <= item.published_at <= window.end)
-
-
-def compute_momentum(baseline_rate: float, current_rate: float) -> float:
-    return (current_rate - baseline_rate) / max(0.05, baseline_rate)
-
-
-def window_days(window: Window) -> int:
-    return max(1, (window.end - window.start).days + 1)
-
-
-def classify_direction(
-    baseline: int,
-    current: int,
-    momentum: float,
-    items: list[EvidenceItem],
-    current_window: Window | None,
-) -> str:
-    if current > 0 and baseline == 0:
-        return "emerging"
-    if momentum >= 1.0:
-        return "rising"
-    if momentum <= -1.0:
-        return "fading"
-    if current_window:
-        first_dates = [item.published_at for item in items if item.published_at]
-        if first_dates and min(first_dates) >= current_window.start:
-            return "emerging"
-    return "stable"
-
-
-def direction_rank(direction: str) -> int:
-    return {"emerging": 4, "rising": 3, "stable": 2, "fading": 1}.get(direction, 0)
-
-
-def theme_relevance(topic: str, title: str, items: list[EvidenceItem]) -> float:
-    item_text = " ".join([*[item.title for item in items], *[item.body[:500] for item in items]]).lower()
-    text = " ".join([title.lower(), item_text])
-    normalized_topic = topic.lower().strip()
-    tokens = topic_tokens(topic)
-    if not tokens:
-        return 1.0
-    text_tokens = set(topic_tokens(text))
-    matched = sum(1 for token in tokens if token in text_tokens)
-    score = matched / len(tokens)
-    if normalized_topic and normalized_topic in text:
-        score += 0.6
-    if topic_phrase_match(tokens, item_text):
-        score += 0.35
-    return min(score, 1.5)
-
-
-def topic_tokens(topic: str) -> list[str]:
-    stop = {"the", "a", "an", "and", "or", "of", "for", "to", "in", "on", "with", "ai"}
-    raw = re.findall(r"[a-z0-9][a-z0-9-]{1,}", topic.lower())
-    tokens = []
-    for token in raw:
-        token = normalize_token(token)
-        if token and token not in stop and token not in tokens:
-            tokens.append(token)
-    return tokens
-
-
-def normalize_token(token: str) -> str:
-    token = token.lower().strip("-_").rstrip("s")
-    replacements = {
-        "improving": "improv",
-        "improvement": "improv",
-        "improve": "improv",
-        "improved": "improv",
-        "learning": "learn",
-        "learned": "learn",
-        "agents": "agent",
-        "agentic": "agent",
-        "tools": "tool",
-        "servers": "server",
-    }
-    return replacements.get(token, token)
-
-
-def topic_phrase_match(tokens: list[str], text: str) -> bool:
-    if len(tokens) < 2:
-        return False
-    text_tokens = topic_tokens(text)
-    text_bigrams = set(zip(text_tokens, text_tokens[1:]))
-    query_bigrams = set(zip(tokens, tokens[1:]))
-    return bool(text_bigrams & query_bigrams)
-
-
-def evidence_score(raw: dict[str, Any]) -> float:
-    engagement = raw.get("engagement")
-    score = 0.0
-    for key in ("score", "engagement_score", "freshness", "local_rank_score", "local_relevance"):
+def first_text(raw: dict[str, Any], keys: list[str]) -> str:
+    for key in keys:
         value = raw.get(key)
-        if isinstance(value, (int, float)):
-            score += float(value)
-    if isinstance(engagement, dict):
-        for key in ("score", "likes", "upvotes", "comments", "views", "rank_score", "postCount"):
-            value = engagement.get(key)
-            if isinstance(value, (int, float)):
-                score += min(float(value), 1000.0) / 20.0
-    return score or 1.0
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 def parse_item_date(raw: dict[str, Any]) -> date | None:
-    candidates = [
-        raw.get("published_at"),
-        raw.get("created_at"),
-        raw.get("date"),
-        raw.get("posted_at"),
-        raw.get("timestamp"),
-    ]
+    candidates = [raw.get("published_at"), raw.get("created_at"), raw.get("date"),
+                  raw.get("posted_at"), raw.get("timestamp")]
     metadata = raw.get("metadata")
     if isinstance(metadata, dict):
         candidates.extend([metadata.get("published_at"), metadata.get("posted_at"), metadata.get("date")])
@@ -983,319 +2065,39 @@ def try_parse_date(value: Any) -> date | None:
         return None
 
 
-def parse_date(value: str) -> date:
-    try:
-        return date.fromisoformat(value[:10])
-    except ValueError as exc:
-        raise SystemExit(f"Invalid date {value!r}; expected YYYY-MM-DD") from exc
-
-
-def first_text(raw: dict[str, Any], keys: list[str]) -> str:
-    for key in keys:
-        value = raw.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
-
-
-def fuzzy_find_item(candidate_id: str, evidence: list[EvidenceItem]) -> EvidenceItem | None:
-    for item in evidence:
-        if candidate_id and (candidate_id == item.url or candidate_id == item.raw.get("item_id")):
-            return item
-    for item in evidence:
-        if candidate_id and item.url and (candidate_id in item.url or item.url in candidate_id):
-            return item
-    return None
-
-
-def serialize_window(window: Window) -> dict[str, str]:
-    return {"label": window.label, "start": window.start.isoformat(), "end": window.end.isoformat()}
-
-
-def serialize_theme(theme: TrendTheme) -> dict[str, Any]:
-    return {
-        "title": theme.title,
-        "direction": theme.direction,
-        "momentum": theme.momentum,
-        "current_count": theme.current_count,
-        "baseline_count": theme.baseline_count,
-        "source_diversity": theme.source_diversity,
-        "evidence_count": len(theme.evidence),
-        "score": theme.score,
-        "windows": theme.windows,
-        "sources": theme.sources,
-        "evidence": [
-            {
-                "source": item.source,
-                "title": item.title,
-                "url": item.url,
-                "published_at": item.published_at.isoformat() if item.published_at else "",
-                "score": round(item.score, 3),
-                "snippet": item.body[:300],
-            }
-            for item in theme.evidence
-        ],
-    }
-
-
-def render_markdown(payload: dict[str, Any], html_path: Path | None = None, json_path: Path | None = None) -> str:
-    lines = [
-        f"trender v{VERSION} - analyzed {payload['generated_at'][:10]}",
-        "",
-        f"What moved for **{md_text(payload['topic'])}**:",
-        "",
-        (
-            f"Window: {payload['window']['start']} to {payload['window']['end']} - "
-            f"retrieval lookback: {payload['retrieval_days']} days - "
-            f"sources: {payload['source_count']}"
-        ),
-        "",
-    ]
-    if payload["compare_windows"]:
-        labels = " vs ".join(window["label"] for window in payload["compare_windows"])
-        lines.extend([f"Comparison: {labels}", ""])
-
-    if not payload["themes"]:
-        lines.append("No dateable trend themes were found in the retrieved evidence.")
-    else:
-        for index, theme in enumerate(payload["themes"][:8], start=1):
-            lines.append(
-                f"{index}. **{md_text(theme['title'])}** - {theme['direction']} "
-                f"(momentum {theme['momentum']}, evidence {theme['evidence_count']}, diversity {theme['source_diversity']})"
-            )
-            if theme["current_count"] or theme["baseline_count"]:
-                lines.append(
-                    f"   - Signal moved from {theme['baseline_count']} baseline item(s) to "
-                    f"{theme['current_count']} recent/current item(s)."
-                )
-            evidence = theme["evidence"][:2]
-            for item in evidence:
-                link = f" - {item['url']}" if item["url"] else ""
-                date_part = f"{item['published_at']} · " if item["published_at"] else ""
-                date_part = f"{item['published_at']} - " if item["published_at"] else ""
-                lines.append(f"   - {date_part}{item['source']}: {md_text(item['title'])}{link}")
-            lines.append("")
-
-    source_counts = payload.get("source_counts", {})
-    if source_counts:
-        lines.append("Source coverage: " + ", ".join(f"{source}={count}" for source, count in sorted(source_counts.items())))
-    for note in payload.get("coverage_notes", []):
-        lines.append(f"Coverage note: {note}")
-    if html_path:
-        lines.append(f"HTML trend map: {html_path}")
-    if json_path:
-        lines.append(f"JSON data: {json_path}")
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def md_text(value: Any) -> str:
-    return (
-        str(value)
-        .replace("—", "-")
-        .replace("–", "-")
-        .replace("·", "-")
-        .replace("“", '"')
-        .replace("”", '"')
-        .replace("’", "'")
-        .replace("‘", "'")
-        .replace("☀️", "")
-        .replace("☀", "")
-    )
-
-
-def render_html(payload: dict[str, Any]) -> str:
-    data = json.dumps(payload, ensure_ascii=False)
-    themes = payload.get("themes", [])
-    source_counts = payload.get("source_counts", {})
-    direction_counts = Counter(theme.get("direction", "unknown") for theme in themes)
-    total_evidence = sum(int(theme.get("evidence_count", 0)) for theme in themes)
-    max_source_count = max([1, *[int(value) for value in source_counts.values()]])
-    max_window_count = max(
-        [1, *[int(value) for theme in themes for value in theme.get("windows", {}).values()]]
-    )
-
-    source_bars = "".join(
-        f"""
-        <div class="bar-row">
-          <span>{escape(source)}</span>
-          <div class="bar-track"><div class="bar-fill" style="width:{(count / max_source_count) * 100:.1f}%"></div></div>
-          <strong>{count}</strong>
-        </div>
-        """
-        for source, count in sorted(source_counts.items(), key=lambda item: item[1], reverse=True)
-    )
-
-    direction_chips = "".join(
-        f"<span class=\"chip {escape(direction)}\">{escape(direction)} {count}</span>"
-        for direction, count in sorted(direction_counts.items())
-    )
-
-    cards = []
-    for index, theme in enumerate(themes, start=1):
-        windows = theme.get("windows", {})
-        timeline = "".join(
-            f"""
-            <div class="tick" title="{escape(label)}: {count}">
-              <div class="tick-bar" style="height:{max(8, (int(count) / max_window_count) * 72):.1f}px"></div>
-            </div>
-            """
-            for label, count in windows.items()
-        )
-        evidence = "".join(
-            f"""
-            <li>
-              <div class="evidence-meta">{escape(item.get('published_at') or 'unknown date')} · {escape(item.get('source') or 'source')}</div>
-              <a href="{escape(item.get('url') or '#')}" target="_blank" rel="noreferrer">{escape(md_text(item.get('title') or 'Untitled evidence'))}</a>
-              <p>{escape(md_text(item.get('snippet') or ''))}</p>
-            </li>
-            """
-            for item in theme.get("evidence", [])
-        )
-        cards.append(
-            f"""
-            <article class="theme-card {escape(theme.get('direction', 'stable'))}">
-              <div class="theme-rank">{index}</div>
-              <div class="theme-body">
-                <div class="theme-topline">
-                  <span class="chip {escape(theme.get('direction', 'stable'))}">{escape(theme.get('direction', 'stable'))}</span>
-                  <span class="muted">momentum {theme.get('momentum', 0)} · evidence {theme.get('evidence_count', 0)} · diversity {theme.get('source_diversity', 0)}</span>
-                </div>
-                <h2>{escape(md_text(theme.get('title') or 'Untitled trend'))}</h2>
-                <div class="movement">
-                  <div><strong>{theme.get('baseline_count', 0)}</strong><span>baseline</span></div>
-                  <div class="arrow">→</div>
-                  <div><strong>{theme.get('current_count', 0)}</strong><span>recent/current</span></div>
-                </div>
-                <div class="timeline" aria-label="timeline">{timeline}</div>
-                <details>
-                  <summary>Original evidence</summary>
-                  <ul class="evidence-list">{evidence}</ul>
-                </details>
-              </div>
-            </article>
-            """
-        )
-
-    coverage_notes = "".join(
-        f"<li>{escape(note)}</li>" for note in payload.get("coverage_notes", [])
-    )
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Trender - {escape(payload['topic'])}</title>
-<style>
-* {{ box-sizing: border-box; }}
-body {{ margin: 0; background: radial-gradient(circle at top left, #172554, #08111f 45%, #050816); color: #eef2ff; font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; }}
-main {{ max-width: 1180px; margin: 0 auto; padding: 32px; }}
-.hero {{ border: 1px solid rgba(148,163,184,.25); background: linear-gradient(135deg, rgba(59,130,246,.22), rgba(15,23,42,.86)); border-radius: 28px; padding: 30px; box-shadow: 0 24px 80px rgba(0,0,0,.35); }}
-.eyebrow {{ color: #67e8f9; font-size: 12px; font-weight: 800; letter-spacing: .22em; text-transform: uppercase; }}
-h1 {{ margin: 8px 0 10px; font-size: clamp(34px, 6vw, 64px); line-height: .95; }}
-.subtitle, .muted {{ color: #a8b3cf; }}
-.metrics {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-top: 24px; }}
-.metric {{ background: rgba(15,23,42,.72); border: 1px solid rgba(148,163,184,.2); border-radius: 18px; padding: 16px; }}
-.metric strong {{ display: block; font-size: 30px; }}
-.metric span {{ color: #a8b3cf; font-size: 13px; }}
-.layout {{ display: grid; grid-template-columns: 340px 1fr; gap: 18px; margin-top: 18px; align-items: start; }}
-.panel, .theme-card {{ background: rgba(15,23,42,.78); border: 1px solid rgba(148,163,184,.18); border-radius: 22px; box-shadow: 0 18px 60px rgba(0,0,0,.24); }}
-.panel {{ padding: 18px; }}
-.panel h2 {{ margin: 0 0 14px; font-size: 16px; }}
-.bar-row {{ display: grid; grid-template-columns: 86px 1fr 32px; gap: 10px; align-items: center; margin: 10px 0; font-size: 13px; }}
-.bar-track {{ height: 10px; border-radius: 999px; background: rgba(148,163,184,.18); overflow: hidden; }}
-.bar-fill {{ height: 100%; border-radius: inherit; background: linear-gradient(90deg, #22d3ee, #a78bfa); }}
-.chips {{ display: flex; flex-wrap: wrap; gap: 8px; }}
-.chip {{ display: inline-flex; align-items: center; border-radius: 999px; padding: 5px 10px; font-size: 12px; font-weight: 800; background: #334155; color: #e2e8f0; text-transform: uppercase; letter-spacing: .04em; }}
-.chip.emerging {{ background: #14532d; color: #bbf7d0; }} .chip.rising {{ background: #1e3a8a; color: #bfdbfe; }} .chip.fading {{ background: #7f1d1d; color: #fecaca; }} .chip.stable {{ background: #3f3f46; color: #e4e4e7; }}
-.notes {{ color: #fef3c7; padding-left: 20px; }}
-.theme-list {{ display: grid; gap: 14px; }}
-.theme-card {{ display: grid; grid-template-columns: 54px 1fr; padding: 0; overflow: hidden; }}
-.theme-rank {{ display: grid; place-items: start center; padding-top: 20px; font-size: 24px; font-weight: 900; color: rgba(255,255,255,.28); background: rgba(255,255,255,.04); }}
-.theme-body {{ padding: 18px; }}
-.theme-topline {{ display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }}
-.theme-card h2 {{ margin: 12px 0; font-size: 22px; line-height: 1.18; }}
-.movement {{ display: inline-grid; grid-template-columns: auto 28px auto; align-items: center; gap: 10px; margin: 4px 0 14px; }}
-.movement div:not(.arrow) {{ background: rgba(255,255,255,.06); border-radius: 14px; padding: 9px 12px; }}
-.movement strong {{ display: block; font-size: 22px; }}
-.movement span {{ color: #a8b3cf; font-size: 12px; }}
-.arrow {{ color: #67e8f9; font-weight: 900; }}
-.timeline {{ display: flex; align-items: end; gap: 3px; min-height: 86px; padding: 10px; border-radius: 16px; background: rgba(2,6,23,.55); border: 1px solid rgba(148,163,184,.14); overflow-x: auto; }}
-.tick {{ min-width: 10px; display: flex; align-items: end; justify-content: center; }}
-.tick-bar {{ width: 8px; min-height: 8px; border-radius: 999px 999px 2px 2px; background: linear-gradient(180deg, #67e8f9, #2563eb); }}
-details {{ margin-top: 12px; }}
-summary {{ cursor: pointer; color: #93c5fd; font-weight: 700; }}
-.evidence-list {{ padding-left: 18px; }}
-.evidence-list li {{ margin: 12px 0; }}
-.evidence-meta {{ color: #94a3b8; font-size: 12px; margin-bottom: 3px; }}
-.evidence-list p {{ color: #a8b3cf; margin: 4px 0 0; }}
-a {{ color: #93c5fd; }}
-@media (max-width: 900px) {{ main {{ padding: 18px; }} .metrics, .layout {{ grid-template-columns: 1fr; }} .theme-card {{ grid-template-columns: 42px 1fr; }} }}
-</style>
-</head>
-<body>
-<main>
-<section class="hero">
-<div class="eyebrow">Trender v{VERSION}</div>
-<h1>{escape(md_text(payload['topic']))}</h1>
-<p class="subtitle">Generated {escape(payload['generated_at'])}. Window {escape(payload['window']['start'])} to {escape(payload['window']['end'])}; retrieval lookback {payload['retrieval_days']} days.</p>
-<div class="metrics">
-  <div class="metric"><strong>{payload['source_count']}</strong><span>source items</span></div>
-  <div class="metric"><strong>{len(themes)}</strong><span>trend themes</span></div>
-  <div class="metric"><strong>{total_evidence}</strong><span>theme evidence links</span></div>
-  <div class="metric"><strong>{len(source_counts)}</strong><span>active sources</span></div>
-</div>
-</section>
-<section class="layout">
-  <aside class="panel">
-    <h2>Source coverage</h2>
-    {source_bars or '<p class="muted">No source evidence returned.</p>'}
-    <h2 style="margin-top:22px">Directions</h2>
-    <div class="chips">{direction_chips or '<span class="chip">none</span>'}</div>
-    <h2 style="margin-top:22px">Coverage notes</h2>
-    <ul class="notes">{coverage_notes or '<li>No coverage warnings.</li>'}</ul>
-  </aside>
-  <section class="theme-list">
-    {''.join(cards) or '<article class="theme-card"><div class="theme-rank">0</div><div class="theme-body"><h2>No trend themes found</h2><p class="muted">Try a broader query or configure more last30days providers.</p></div></article>'}
-  </section>
-</section>
-</main>
-<script type="application/json" id="trender-data">{escape(data)}</script>
-</body>
-</html>"""
-
-
 def slugify(value: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.lower()).strip("-")
     return slug or "trend"
 
 
-def coverage_notes(evidence: list[EvidenceItem]) -> list[str]:
-    active = sorted({item.source for item in evidence})
-    notes: list[str] = []
-    if len(active) <= 3:
-        notes.append(
-            "Only "
-            + ", ".join(active or ["no sources"])
-            + " returned evidence. Treat source-diversity conclusions as provisional."
-        )
-    missing_high_signal = [
-        source
-        for source in ["x", "youtube", "tiktok", "grounding", "perplexity", "digg"]
-        if source not in active
-    ]
-    if missing_high_signal:
-        notes.append(
-            "High-signal sources not represented in this run: "
-            + ", ".join(missing_high_signal)
-            + ". Configure the corresponding last30days credentials/backends for broader coverage."
-        )
-    if "trender-agent-web" not in active:
-        notes.append(
-            "No host-agent web evidence was provided. For broader web coverage, have the coding agent write a JSON evidence file and pass --agent-web-file."
-        )
-    return notes
+def configure_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="replace")
+
+
+def write_stdout(text: str) -> None:
+    output = text.replace("\n", os.linesep)
+    if not text.endswith("\n"):
+        output += os.linesep
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is not None:
+        buffer.write(output.encode("utf-8", errors="replace"))
+        buffer.flush()
+    else:
+        sys.stdout.write(output)
+
+
+def open_html_report(path: Path) -> None:
+    try:
+        webbrowser.open(path.resolve().as_uri())
+    except Exception:
+        if os.name == "nt":
+            os.startfile(str(path.resolve()))  # type: ignore[attr-defined]
+        else:
+            raise
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
