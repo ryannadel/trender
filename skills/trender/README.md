@@ -6,6 +6,8 @@ The skill bundles a compatible `last30days` engine under `vendor/last30days`, so
 
 For deep web research, use the host coding agent's web/deep-research tools, write findings to JSON, and pass that file with `--agent-web-file`.
 
+The host coding agent also authors the **bottom-line-up-front (BLUF)** summary — a few scannable bullets that lead the report — and an optional forward outlook, handing them to Trender via `--narrative-file`. If omitted, Trender renders a clearly-labeled auto-generated fallback derived from the strongest computed signals.
+
 ## Install
 
 ```powershell
@@ -28,6 +30,9 @@ python3 scripts/trender.py setup
 
 # Default: compare last 30 days vs prior 5 months
 python3 scripts/trender.py "agentic AI" --agent-web-file ./agent-web.json
+
+# With an agent-authored bottom line + forward outlook
+python3 scripts/trender.py "agentic AI" --agent-web-file ./agent-web.json --narrative-file ./narrative.json
 
 # Explicit comparison windows
 python3 scripts/trender.py "agentic AI" --compare=7,30  --agent-web-file ./agent-web.json
