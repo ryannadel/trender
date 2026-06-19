@@ -488,9 +488,27 @@ def evidence_score_raw(raw: dict[str, Any]) -> float:
 STOPWORDS = frozenset(
     """a an and or but if then else of for to in on at by with from into over under
     is are was were be been being have has had do does did this that these those it its
-    as so not no yes can will would should could may might must about which what when where
-    who whom why how than such only also more most less least new now today yesterday
-    just very really i you he she they them we us our your their there here""".split()
+    as so not no yes can will would would not would have would be would also could should
+    may might must about which what when where who whom why how than such only also
+    more most less least new now today yesterday just very really i you he she they them
+    we us our your their there here many much each all any both either neither some other
+    others another like get got make made go going gone goes come came use uses using used
+    show shown showing show hn ask hn launch hn ai""".split()
+)
+
+# Terms that are too generic to use as cluster *labels* even if they survive the
+# document-level stopword filter. Helps avoid labels like "home, broke, going".
+LABEL_BLACKLIST = frozenset(
+    """home broke going broken best version run runs running ran ship ships shipped
+    work works working worked time times today week weeks year years month months
+    day days hour hours minute minutes second seconds first second third fourth
+    big bigger biggest small smaller smallest large larger largest little long short
+    top bottom right wrong full empty open closed coming due
+    high low fast slow good bad better worse great cool nice fine simple easy hard
+    really actually just maybe probably perhaps certainly definitely possibly
+    quot amp lt gt apos nbsp http https www com org net io app blog post comment
+    thing things stuff something nothing anything everything anyone someone everyone
+    quite very pretty rather somewhat fairly highly""".split()
 )
 _WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_+-]{1,}")
 
@@ -499,8 +517,19 @@ def tokenize(text: str) -> list[str]:
     return [w.lower() for w in _WORD_RE.findall(text) if w.lower() not in STOPWORDS and len(w) > 2]
 
 
+def title_bigrams(title: str) -> list[str]:
+    toks = tokenize(title)
+    return [f"{a} {b}" for a, b in zip(toks, toks[1:]) if a not in LABEL_BLACKLIST and b not in LABEL_BLACKLIST]
+
+
 def tfidf_vectors(items: list[EvidenceItem]) -> tuple[list[dict[str, float]], dict[str, float]]:
-    docs = [tokenize(item.text) for item in items]
+    """Document vectors weighted toward titles (titles are denser signal than bodies)."""
+    docs: list[list[str]] = []
+    for item in items:
+        title_tokens = tokenize(item.title)
+        body_tokens = tokenize(item.body)
+        # boost titles 3x in TF
+        docs.append(title_tokens * 3 + body_tokens)
     df: Counter[str] = Counter()
     for doc in docs:
         for term in set(doc):
@@ -529,43 +558,104 @@ def cosine(a: dict[str, float], b: dict[str, float]) -> float:
 
 
 def cluster_items(items: list[EvidenceItem], vectors: list[dict[str, float]],
-                   *, threshold: float = 0.32) -> list[list[int]]:
+                   *, threshold: float = 0.22) -> list[list[int]]:
+    """Greedy cosine clustering with a small bucket-affinity boost."""
     clusters: list[dict[str, Any]] = []
     for idx, vec in enumerate(vectors):
+        item = items[idx]
         if not vec:
-            clusters.append({"indices": [idx], "centroid": dict(vec), "size": 1})
+            clusters.append({"indices": [idx], "centroid": dict(vec), "buckets": Counter([item.bucket]), "size": 1})
             continue
         best_i = -1
         best_sim = 0.0
         for ci, cluster in enumerate(clusters):
             sim = cosine(vec, cluster["centroid"])
+            # bucket boost: items in same dominant bucket are slightly more similar
+            dominant_bucket = cluster["buckets"].most_common(1)[0][0]
+            if dominant_bucket == item.bucket:
+                sim += 0.04
             if sim > best_sim:
                 best_sim = sim
                 best_i = ci
         if best_i >= 0 and best_sim >= threshold:
             cluster = clusters[best_i]
             cluster["indices"].append(idx)
+            cluster["buckets"][item.bucket] += 1
             new_size = cluster["size"] + 1
             centroid = cluster["centroid"]
             for term, weight in vec.items():
                 centroid[term] = centroid.get(term, 0.0) + (weight - centroid.get(term, 0.0)) / new_size
             cluster["size"] = new_size
         else:
-            clusters.append({"indices": [idx], "centroid": dict(vec), "size": 1})
+            clusters.append({"indices": [idx], "centroid": dict(vec), "buckets": Counter([item.bucket]), "size": 1})
     return [c["indices"] for c in clusters]
 
 
 def label_cluster(cluster_items_list: list[EvidenceItem], vectors: list[dict[str, float]],
-                   indices: list[int], *, topic: str) -> tuple[str, list[str]]:
-    agg: Counter[str] = Counter()
-    for i in indices:
-        for term, weight in vectors[i].items():
-            agg[term] += weight
+                   indices: list[int], *, topic: str, idf: dict[str, float]) -> tuple[str, list[str]]:
+    """Generate a clean human-readable label from titles only.
+
+    Strategy: aggregate IDF-weighted unigrams + bigrams from titles across the
+    cluster, drop topic words and label-blacklisted generic terms, prefer
+    bigrams when they meet a frequency floor, fall back to top unigrams.
+    """
     topic_set = set(tokenize(topic))
-    ranked = [t for t, _ in agg.most_common(20) if t not in topic_set]
-    top_terms = ranked[:3] if ranked else [t for t, _ in agg.most_common(3)]
-    title = ", ".join(top_terms) if top_terms else cluster_items_list[0].title[:80]
-    return title, top_terms
+    titles = [it.title for it in cluster_items_list]
+
+    unigram_score: Counter[str] = Counter()
+    for title in titles:
+        for tok in tokenize(title):
+            if tok in topic_set or tok in LABEL_BLACKLIST or len(tok) < 3:
+                continue
+            unigram_score[tok] += idf.get(tok, 1.0)
+
+    bigram_score: Counter[str] = Counter()
+    bigram_freq: Counter[str] = Counter()
+    for title in titles:
+        for bg in title_bigrams(title):
+            a, b = bg.split(" ", 1)
+            if a in topic_set and b in topic_set:
+                continue
+            if a in LABEL_BLACKLIST or b in LABEL_BLACKLIST:
+                continue
+            bigram_score[bg] += idf.get(a, 1.0) + idf.get(b, 1.0)
+            bigram_freq[bg] += 1
+
+    # Prefer bigrams that actually repeat in the cluster (real phrases, not noise).
+    repeat_bigrams = [bg for bg, n in bigram_freq.items() if n >= 2]
+    if repeat_bigrams:
+        repeat_bigrams.sort(key=lambda bg: bigram_score[bg], reverse=True)
+        chosen = repeat_bigrams[:2]
+        # Add one supporting unigram not already covered
+        covered = set(" ".join(chosen).split())
+        extra = [t for t, _ in unigram_score.most_common(10) if t not in covered]
+        if extra:
+            chosen.append(extra[0])
+        terms = chosen
+    else:
+        # No repeating phrases — use top distinctive unigrams
+        terms = [t for t, _ in unigram_score.most_common(3)]
+        # If still empty (very short cluster), fall back to first title's distinctive words
+        if not terms:
+            terms = [t for t, _ in unigram_score.most_common(3)] or [
+                cluster_items_list[0].title[:60].rstrip()
+            ]
+
+    title = humanize_label(terms)
+    return title, terms
+
+
+def humanize_label(terms: list[str]) -> str:
+    if not terms:
+        return "Untitled cluster"
+    parts = []
+    for term in terms:
+        words = term.split()
+        # Title-case acronyms-aware: keep ALL-CAPS acronyms uppercase, capitalize others
+        cleaned = " ".join(w.upper() if len(w) <= 4 and w.isalpha() and w.lower() in {"ai", "api", "llm", "mcp", "rfc", "ide", "cli", "sdk", "gpu", "tts", "ocr"} else w.capitalize() for w in words)
+        parts.append(cleaned)
+    return " · ".join(parts)
+
 
 
 def make_time_buckets(start: date, end: date) -> list[Window]:
@@ -608,12 +698,18 @@ def cluster_and_analyze(items: list[EvidenceItem], *, topic: str, buckets: list[
                          compare_windows: list[Window]) -> list[TrendTheme]:
     if not items:
         return []
-    vectors, _idf = tfidf_vectors(items)
+    vectors, idf = tfidf_vectors(items)
     cluster_indices = cluster_items(items, vectors)
+
+    # Drop singleton clusters from theme display — they're noise and inflate
+    # overview counts. They still flow through entity / vocab / inflection
+    # analyses elsewhere because those operate over `items` directly.
+    cluster_indices = [c for c in cluster_indices if len(c) >= 2]
+
     themes: list[TrendTheme] = []
     for indices in cluster_indices:
         cluster_items_list = [items[i] for i in indices]
-        title, terms = label_cluster(cluster_items_list, vectors, indices, topic=topic)
+        title, terms = label_cluster(cluster_items_list, vectors, indices, topic=topic, idf=idf)
         themes.append(build_theme(title, terms, cluster_items_list, buckets, compare_windows))
     themes = [t for t in themes if t.current_count + t.baseline_count > 0 or len(t.evidence) > 0]
     themes.sort(key=lambda t: (direction_rank(t.direction), t.score), reverse=True)
@@ -657,11 +753,13 @@ def build_theme(title: str, terms: list[str], cluster_items_list: list[EvidenceI
 
 
 def classify_direction(baseline: int, current: int, slope: float, momentum: float) -> str:
-    if baseline == 0 and current >= 3:
+    if baseline == 0 and current >= 2:
         return "emerging"
-    if slope > 0 and momentum > 0.5 and current >= 3:
+    if baseline >= 2 and current == 0:
+        return "fading"
+    if slope > 0 and momentum > 0.5 and current >= 2:
         return "rising"
-    if slope < 0 and momentum < -0.4 and baseline >= 3:
+    if slope < 0 and momentum < -0.4 and baseline >= 2:
         return "fading"
     return "stable"
 
@@ -993,344 +1091,796 @@ def render_theme_md(theme: dict[str, Any], *, compact: bool = False) -> list[str
     return lines
 
 
+
+
 def render_html(payload: dict[str, Any]) -> str:
+    """Render a modern, interactive trend map.
+
+    The page is fully self-contained (CSS + small vanilla-JS bundle inline).
+    The complete trend payload is embedded in a JSON island; the bundle
+    reads it and renders direction filtering, search, sparklines, and
+    smooth scroll navigation on top of it.
+    """
     themes = payload.get("themes", [])
     by_dir: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for t in themes:
         by_dir[t.get("direction", "stable")].append(t)
 
-    inflections_html = render_inflections_html(payload.get("inflection_moments", []))
-    sections_html = ""
-    for direction, label in (("emerging", "Emerging"), ("rising", "Accelerating"), ("fading", "Fading")):
-        items = by_dir.get(direction, [])
-        if not items:
-            continue
-        sections_html += f"<section class=\"theme-section\"><h2>{label} themes</h2>"
-        sections_html += "".join(render_theme_card(t, payload["buckets"]) for t in items)
-        sections_html += "</section>"
+    direction_counts = {d: len(by_dir.get(d, [])) for d in ("emerging", "rising", "stable", "fading")}
+    payload_json = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
 
-    stable = by_dir.get("stable", [])
-    if stable:
-        cards = "".join(render_theme_card(t, payload["buckets"]) for t in stable[:8])
-        sections_html += (
-            "<section class=\"theme-section\"><details><summary>"
-            "<h2 style=\"display:inline\">Stable themes</h2></summary>"
-            f"{cards}</details></section>"
-        )
-
-    entities_html = render_entities_html(payload.get("emerging_entities", []))
-    vocab_html = render_vocab_html(payload.get("vocabulary_drift", []))
-    forward_html = render_forward_html(payload.get("forward_signals", []))
-
-    source_counts = payload.get("source_counts", {})
-    bucket_counts = payload.get("bucket_counts", {})
-    max_source = max([1, *source_counts.values()])
-    source_bars = "".join(
-        f"<div class=\"bar-row\"><span>{escape(s)}</span>"
-        f"<div class=\"bar-track\"><div class=\"bar-fill\" "
-        f"style=\"width:{(c / max_source) * 100:.1f}%\"></div></div>"
-        f"<strong>{c}</strong></div>"
-        for s, c in sorted(source_counts.items(), key=lambda x: x[1], reverse=True)
-    )
-    bucket_chips = "".join(
-        f"<span class=\"chip bucket-{escape(b)}\">{escape(b)} {c}</span>"
-        for b, c in sorted(bucket_counts.items(), key=lambda x: x[1], reverse=True)
-    )
-    notes_html = "".join(f"<li>{escape(n)}</li>" for n in payload.get("coverage_notes", []))
-
-    comparison_html = ""
-    if payload.get("compare_windows"):
-        labels = " vs ".join(c["label"] for c in payload["compare_windows"])
-        comparison_html = f"<div class=\"comparison\">Comparison: {escape(labels)}</div>"
-
-    return TEMPLATE.format(
-        topic=escape(payload["topic"]), version=escape(payload["version"]),
+    return MODERN_TEMPLATE.format(
+        topic=escape(payload["topic"]),
+        version=escape(payload["version"]),
         generated_at=escape(payload["generated_at"]),
+        generated_short=escape(payload["generated_at"][:10]),
         window_start=escape(payload["window"]["start"]),
         window_end=escape(payload["window"]["end"]),
         retrieval_days=payload["retrieval_days"],
-        source_count=payload["source_count"], n_themes=len(themes),
+        source_count=payload["source_count"],
+        n_themes=len(themes),
         n_entities=len(payload.get("emerging_entities", [])),
+        n_inflections=len(payload.get("inflection_moments", [])),
         n_vocab=len(payload.get("vocabulary_drift", [])),
-        comparison_html=comparison_html,
-        inflections_html=inflections_html,
-        sections_html=sections_html or "<p class=\"muted\">No themes detected.</p>",
-        entities_html=entities_html, vocab_html=vocab_html, forward_html=forward_html,
-        source_bars=source_bars or "<p class=\"muted\">No sources returned evidence.</p>",
-        bucket_chips=bucket_chips or "<span class=\"chip\">none</span>",
-        notes_html=notes_html or "<li>No coverage warnings.</li>",
+        n_forward=len(payload.get("forward_signals", [])),
+        n_emerging=direction_counts["emerging"],
+        n_rising=direction_counts["rising"],
+        n_stable=direction_counts["stable"],
+        n_fading=direction_counts["fading"],
+        comparison_label=escape(
+            " vs ".join(c["label"] for c in payload.get("compare_windows", []))
+            or "single window"
+        ),
+        payload_json=payload_json,
     )
 
 
-def render_theme_card(theme: dict[str, Any], buckets: list[dict[str, str]]) -> str:
-    bucket_counts = theme.get("bucket_counts", {})
-    values = [int(bucket_counts.get(b["label"], 0)) for b in buckets]
-    sparkline = svg_sparkline(values)
-    then = theme.get("then")
-    now = theme.get("now")
-    quote_pair = ""
-    if then or now:
-        quote_pair = "<div class=\"quote-pair\">"
-        if then:
-            quote_pair += (
-                f"<div class=\"quote then\"><div class=\"qlabel\">Then - "
-                f"{escape(then.get('published_at', ''))}</div>"
-                f"<a href=\"{escape(then.get('url', '#'))}\" target=\"_blank\" rel=\"noreferrer\">"
-                f"{escape(then.get('title', ''))}</a>"
-                f"<p>{escape((then.get('snippet') or '')[:240])}</p></div>"
-            )
-        if now:
-            quote_pair += (
-                f"<div class=\"quote now\"><div class=\"qlabel\">Now - "
-                f"{escape(now.get('published_at', ''))}</div>"
-                f"<a href=\"{escape(now.get('url', '#'))}\" target=\"_blank\" rel=\"noreferrer\">"
-                f"{escape(now.get('title', ''))}</a>"
-                f"<p>{escape((now.get('snippet') or '')[:240])}</p></div>"
-            )
-        quote_pair += "</div>"
-
-    evidence_items = "".join(
-        f"<li><div class=\"evidence-meta\">{escape(e.get('published_at') or 'unknown')} - "
-        f"{escape(e.get('source', ''))}</div>"
-        f"<a href=\"{escape(e.get('url') or '#')}\" target=\"_blank\" rel=\"noreferrer\">"
-        f"{escape(e.get('title', ''))}</a>"
-        f"<p>{escape((e.get('snippet') or '')[:220])}</p></li>"
-        for e in (theme.get("evidence") or []) if e
-    )
-    direction = theme.get("direction", "stable")
-    return (
-        f"<article class=\"theme-card {escape(direction)}\">"
-        f"<div class=\"theme-topline\">"
-        f"<span class=\"chip {escape(direction)}\">{escape(direction)}</span>"
-        f"<span class=\"muted\">slope {theme.get('slope', 0)} - "
-        f"momentum {theme.get('momentum', 0)} - sources {theme.get('source_diversity', 0)}</span>"
-        f"</div>"
-        f"<h3>{escape(theme.get('title', 'Untitled'))}</h3>"
-        f"<div class=\"movement\">"
-        f"<div><strong>{theme.get('baseline_count', 0)}</strong><span>baseline</span></div>"
-        f"<div class=\"arrow\">&#8594;</div>"
-        f"<div><strong>{theme.get('current_count', 0)}</strong><span>current</span></div>"
-        f"</div>"
-        f"<div class=\"sparkline\">{sparkline}</div>"
-        f"{quote_pair}"
-        f"<details><summary>Evidence ({len(theme.get('evidence', []))})</summary>"
-        f"<ul class=\"evidence-list\">{evidence_items}</ul>"
-        f"</details>"
-        f"</article>"
-    )
-
-
-def svg_sparkline(values: list[int]) -> str:
-    if not values:
-        return ""
-    w, h = 320, 60
-    n = len(values)
-    max_v = max(values) or 1
-    step = w / max(1, n - 1) if n > 1 else w
-    points = []
-    bars = []
-    for i, v in enumerate(values):
-        x = i * step
-        y = h - (v / max_v) * (h - 8) - 4
-        points.append(f"{x:.1f},{y:.1f}")
-        bh = max(2, (v / max_v) * (h - 8))
-        bars.append(
-            f"<rect x=\"{x - 2:.1f}\" y=\"{h - bh:.1f}\" width=\"4\" height=\"{bh:.1f}\" "
-            f"fill=\"#67e8f9\" opacity=\"0.4\"/>"
-        )
-    polyline = (
-        f"<polyline fill=\"none\" stroke=\"#22d3ee\" stroke-width=\"2\" "
-        f"points=\"{' '.join(points)}\"/>"
-    )
-    return f"<svg viewBox=\"0 0 {w} {h}\" width=\"100%\" height=\"{h}\">{''.join(bars)}{polyline}</svg>"
-
-
-def render_inflections_html(moments: list[dict[str, Any]]) -> str:
-    if not moments:
-        return ""
-    cards = ""
-    for m in moments:
-        head = m.get("headline") or {}
-        link = (
-            f"<a href=\"{escape(head.get('url', '#'))}\" target=\"_blank\" rel=\"noreferrer\">"
-            f"{escape(head.get('title', ''))}</a>"
-        ) if head.get("url") else ""
-        cards += (
-            f"<article class=\"inflection\">"
-            f"<div class=\"date\">{escape(m['start'])} &#8594; {escape(m['end'])}</div>"
-            f"<div class=\"lift\">{m['prior_count']} &#8594; {m['count']} (+{int(m['lift'] * 100)}%)</div>"
-            f"<div class=\"headline\">{link}</div>"
-            f"</article>"
-        )
-    return (
-        f"<section class=\"inflections\"><h2>Inflection moments</h2>"
-        f"<div class=\"inflection-row\">{cards}</div></section>"
-    )
-
-
-def render_entities_html(entities: list[dict[str, Any]]) -> str:
-    if not entities:
-        return ""
-    rows = ""
-    for ent in entities[:15]:
-        ex = ent.get("example") or {}
-        link = (
-            f"<a href=\"{escape(ex.get('url', '#'))}\" target=\"_blank\" rel=\"noreferrer\">"
-            f"{escape(ex.get('title', ''))}</a>"
-        ) if ex.get("url") else ""
-        rows += f"<li><strong>{escape(ent['entity'])}</strong> - {ent['current_count']}x - {link}</li>"
-    return (
-        f"<section class=\"panel\"><h2>New names in the conversation</h2>"
-        f"<ul class=\"entities\">{rows}</ul></section>"
-    )
-
-
-def render_vocab_html(vocab: list[dict[str, Any]]) -> str:
-    if not vocab:
-        return ""
-    rows = ""
-    for term in vocab[:20]:
-        ex = term.get("example") or {}
-        ex_link = (
-            f"<a href=\"{escape(ex.get('url', '#'))}\" target=\"_blank\" rel=\"noreferrer\">"
-            f"{escape((ex.get('title') or '')[:80])}</a>"
-        ) if ex.get("url") else ""
-        rows += (
-            f"<tr><td><strong>{escape(term['term'])}</strong></td>"
-            f"<td>{term['lift']}</td>"
-            f"<td>{term['baseline_count']} &#8594; {term['current_count']}</td>"
-            f"<td>{ex_link}</td></tr>"
-        )
-    return (
-        f"<section class=\"panel\"><h2>Vocabulary drift</h2>"
-        f"<table class=\"vocab\"><thead><tr><th>term</th><th>lift</th>"
-        f"<th>base &#8594; cur</th><th>example</th></tr></thead>"
-        f"<tbody>{rows}</tbody></table></section>"
-    )
-
-
-def render_forward_html(signals: list[dict[str, Any]]) -> str:
-    if not signals:
-        return ""
-    rows = ""
-    for sig in signals[:10]:
-        if not sig:
-            continue
-        rows += (
-            f"<li><div class=\"evidence-meta\">{escape(sig.get('published_at', 'unknown'))} - "
-            f"{escape(sig.get('source', ''))}</div>"
-            f"<a href=\"{escape(sig.get('url', '#'))}\" target=\"_blank\" rel=\"noreferrer\">"
-            f"{escape(sig.get('title', ''))}</a>"
-            f"<p>{escape((sig.get('snippet') or '')[:240])}</p></li>"
-        )
-    return f"<section class=\"panel\"><h2>Forward signals</h2><ul class=\"evidence-list\">{rows}</ul></section>"
-
-
-TEMPLATE = """<!doctype html>
+MODERN_TEMPLATE = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Trender - {topic}</title>
+<title>Trender · {topic}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
+:root {{
+  --bg: #06080f;
+  --bg-elev: #0d1220;
+  --bg-card: rgba(20, 26, 44, 0.7);
+  --border: rgba(148, 163, 184, 0.12);
+  --border-strong: rgba(148, 163, 184, 0.24);
+  --text: #e8ecf5;
+  --text-dim: #94a3b8;
+  --text-muted: #64748b;
+  --accent: #67e8f9;
+  --accent-2: #a78bfa;
+  --emerging: #34d399;
+  --rising: #60a5fa;
+  --fading: #f87171;
+  --stable: #94a3b8;
+  --radius: 14px;
+  --radius-lg: 22px;
+  --shadow: 0 1px 0 rgba(255,255,255,0.03) inset, 0 8px 24px rgba(0,0,0,0.32);
+}}
 * {{ box-sizing: border-box; }}
-body {{ margin: 0; background: radial-gradient(circle at top left, #172554, #08111f 45%, #050816); color: #eef2ff; font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }}
-main {{ max-width: 1180px; margin: 0 auto; padding: 32px; }}
-.hero {{ border: 1px solid rgba(148,163,184,.25); background: linear-gradient(135deg, rgba(59,130,246,.22), rgba(15,23,42,.86)); border-radius: 28px; padding: 30px; }}
-.eyebrow {{ color: #67e8f9; font-size: 12px; font-weight: 800; letter-spacing: .22em; text-transform: uppercase; }}
-h1 {{ margin: 8px 0 10px; font-size: clamp(34px, 6vw, 56px); line-height: 1; }}
-.subtitle, .muted {{ color: #a8b3cf; }}
-.comparison {{ margin-top: 6px; color: #93c5fd; font-weight: 600; }}
-.metrics {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-top: 24px; }}
-.metric {{ background: rgba(15,23,42,.72); border: 1px solid rgba(148,163,184,.2); border-radius: 18px; padding: 16px; }}
-.metric strong {{ display: block; font-size: 28px; }}
-.metric span {{ color: #a8b3cf; font-size: 13px; }}
-.layout {{ display: grid; grid-template-columns: 1fr 320px; gap: 22px; margin-top: 22px; align-items: start; }}
-.theme-section, .panel {{ background: rgba(15,23,42,.65); border: 1px solid rgba(148,163,184,.18); border-radius: 22px; padding: 18px; margin-bottom: 18px; }}
-.theme-section h2, .panel h2 {{ margin: 0 0 14px; font-size: 18px; }}
-.theme-card {{ background: rgba(15,23,42,.78); border: 1px solid rgba(148,163,184,.18); border-radius: 16px; padding: 16px; margin: 10px 0; }}
-.theme-card h3 {{ margin: 10px 0 8px; font-size: 20px; }}
-.theme-topline {{ display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }}
-.chip {{ display: inline-flex; align-items: center; border-radius: 999px; padding: 4px 10px; font-size: 11px; font-weight: 800; background: #334155; color: #e2e8f0; text-transform: uppercase; letter-spacing: .04em; }}
-.chip.emerging {{ background: #14532d; color: #bbf7d0; }}
-.chip.rising {{ background: #1e3a8a; color: #bfdbfe; }}
-.chip.fading {{ background: #7f1d1d; color: #fecaca; }}
-.chip.stable {{ background: #3f3f46; color: #e4e4e7; }}
-.movement {{ display: inline-grid; grid-template-columns: auto 24px auto; align-items: center; gap: 10px; margin: 6px 0 10px; }}
-.movement div:not(.arrow) {{ background: rgba(255,255,255,.06); border-radius: 14px; padding: 8px 12px; }}
-.movement strong {{ display: block; font-size: 20px; }}
-.movement span {{ color: #a8b3cf; font-size: 11px; }}
-.arrow {{ color: #67e8f9; font-weight: 900; }}
-.sparkline {{ background: rgba(2,6,23,.55); border: 1px solid rgba(148,163,184,.14); border-radius: 12px; padding: 8px; margin: 8px 0; }}
-.quote-pair {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 12px 0; }}
-.quote {{ background: rgba(255,255,255,.04); border-radius: 12px; padding: 10px 12px; border-left: 3px solid #475569; }}
-.quote.then {{ border-left-color: #94a3b8; }}
-.quote.now {{ border-left-color: #67e8f9; }}
-.quote .qlabel {{ color: #94a3b8; font-size: 11px; text-transform: uppercase; letter-spacing: .1em; margin-bottom: 4px; }}
-.quote a {{ color: #93c5fd; font-weight: 600; }}
-.quote p {{ color: #cbd5e1; font-size: 13px; margin: 6px 0 0; }}
-details {{ margin-top: 8px; }}
-summary {{ cursor: pointer; color: #93c5fd; font-weight: 600; }}
-.evidence-list {{ padding-left: 18px; }}
-.evidence-list li {{ margin: 10px 0; }}
-.evidence-meta {{ color: #94a3b8; font-size: 12px; }}
-.evidence-list a {{ color: #93c5fd; }}
-.evidence-list p {{ color: #a8b3cf; margin: 4px 0 0; font-size: 13px; }}
-.inflections .inflection-row {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }}
-.inflection {{ background: rgba(15,23,42,.78); border: 1px solid rgba(148,163,184,.18); border-radius: 14px; padding: 14px; }}
-.inflection .date {{ color: #67e8f9; font-weight: 700; font-size: 13px; }}
-.inflection .lift {{ font-size: 22px; font-weight: 800; margin: 6px 0; }}
-.inflection .headline a {{ color: #cbd5e1; }}
-.bar-row {{ display: grid; grid-template-columns: 90px 1fr 36px; gap: 10px; align-items: center; margin: 8px 0; font-size: 12px; }}
-.bar-track {{ height: 8px; border-radius: 999px; background: rgba(148,163,184,.18); overflow: hidden; }}
-.bar-fill {{ height: 100%; background: linear-gradient(90deg, #22d3ee, #a78bfa); }}
-.chips {{ display: flex; flex-wrap: wrap; gap: 8px; }}
-.entities {{ padding-left: 18px; }}
-.entities li {{ margin: 6px 0; color: #cbd5e1; }}
-.vocab {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
-.vocab th, .vocab td {{ text-align: left; padding: 6px 4px; border-bottom: 1px solid rgba(148,163,184,.15); }}
-.notes {{ color: #fef3c7; padding-left: 18px; }}
-@media (max-width: 900px) {{ .layout {{ grid-template-columns: 1fr; }} .metrics {{ grid-template-columns: 1fr 1fr; }} .quote-pair {{ grid-template-columns: 1fr; }} }}
+html, body {{ margin: 0; padding: 0; }}
+body {{
+  background: var(--bg);
+  background-image:
+    radial-gradient(1200px 600px at 10% -10%, rgba(103, 232, 249, 0.08), transparent 60%),
+    radial-gradient(1000px 600px at 90% -20%, rgba(167, 139, 250, 0.07), transparent 60%);
+  color: var(--text);
+  font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+  line-height: 1.5;
+  min-height: 100vh;
+}}
+.mono {{ font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }}
+a {{ color: var(--accent); text-decoration: none; transition: color .15s ease; }}
+a:hover {{ color: #a5f3fc; }}
+
+/* layout */
+.container {{ max-width: 1240px; margin: 0 auto; padding: 28px 28px 80px; }}
+.topbar {{
+  position: sticky; top: 0; z-index: 50;
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  background: rgba(6, 8, 15, 0.72);
+  border-bottom: 1px solid var(--border);
+}}
+.topbar-inner {{
+  max-width: 1240px; margin: 0 auto; padding: 12px 28px;
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+}}
+.brand {{ display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: -0.01em; }}
+.brand-dot {{
+  width: 10px; height: 10px; border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  box-shadow: 0 0 16px rgba(103, 232, 249, 0.6);
+}}
+.brand-version {{ color: var(--text-muted); font-weight: 500; font-size: 12px; }}
+.nav {{ display: flex; gap: 4px; flex-wrap: wrap; margin-left: auto; }}
+.nav a {{
+  padding: 6px 12px; border-radius: 999px; color: var(--text-dim);
+  font-size: 13px; font-weight: 500;
+  transition: background .15s ease, color .15s ease;
+}}
+.nav a:hover {{ background: rgba(255,255,255,.04); color: var(--text); }}
+
+/* hero */
+.hero {{ padding: 56px 0 36px; }}
+.eyebrow {{
+  display: inline-flex; align-items: center; gap: 8px;
+  color: var(--text-dim); font-size: 12px; font-weight: 600;
+  letter-spacing: 0.18em; text-transform: uppercase;
+  padding: 6px 12px; border: 1px solid var(--border-strong); border-radius: 999px;
+  background: rgba(148, 163, 184, 0.04);
+}}
+.eyebrow .pulse {{
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 0 rgba(103, 232, 249, 0.7);
+  animation: pulse 2.4s ease-out infinite;
+}}
+@keyframes pulse {{
+  0% {{ box-shadow: 0 0 0 0 rgba(103, 232, 249, 0.5); }}
+  70% {{ box-shadow: 0 0 0 12px rgba(103, 232, 249, 0); }}
+  100% {{ box-shadow: 0 0 0 0 rgba(103, 232, 249, 0); }}
+}}
+h1 {{
+  font-size: clamp(40px, 7vw, 76px);
+  line-height: 1.0; letter-spacing: -0.035em;
+  font-weight: 800; margin: 18px 0 16px;
+  background: linear-gradient(180deg, #ffffff 0%, #cbd5e1 100%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}}
+.hero-sub {{ color: var(--text-dim); font-size: 16px; max-width: 760px; }}
+.hero-meta {{
+  display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; align-items: center;
+}}
+.tag {{
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; padding: 5px 10px; border-radius: 8px;
+  background: rgba(148,163,184,.08); color: var(--text-dim);
+  border: 1px solid var(--border);
+}}
+.tag strong {{ color: var(--text); font-weight: 600; }}
+
+/* metric grid */
+.metrics {{
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 36px;
+}}
+.metric {{
+  position: relative; padding: 18px 18px 16px; border-radius: var(--radius);
+  background: var(--bg-card); border: 1px solid var(--border);
+  overflow: hidden;
+}}
+.metric::before {{
+  content: ''; position: absolute; inset: 0;
+  background: radial-gradient(400px 80px at 100% 0%, rgba(103,232,249,.06), transparent 60%);
+  pointer-events: none;
+}}
+.metric .label {{
+  font-size: 11px; text-transform: uppercase; letter-spacing: .12em; color: var(--text-muted);
+}}
+.metric .value {{
+  font-size: 36px; font-weight: 700; letter-spacing: -0.02em; margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}}
+.metric .delta {{ font-size: 12px; color: var(--text-dim); margin-top: 4px; }}
+
+/* section */
+section.block {{ margin-top: 56px; scroll-margin-top: 80px; }}
+.block-head {{
+  display: flex; align-items: baseline; justify-content: space-between;
+  margin-bottom: 18px; gap: 16px; flex-wrap: wrap;
+}}
+.block-head h2 {{
+  font-size: 24px; letter-spacing: -0.02em; margin: 0; font-weight: 700;
+}}
+.block-head .hint {{ color: var(--text-muted); font-size: 13px; }}
+
+/* inflections strip */
+.inflection-grid {{
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px;
+}}
+.inflection {{
+  padding: 18px; border-radius: var(--radius); border: 1px solid var(--border);
+  background: linear-gradient(160deg, rgba(103,232,249,.06), rgba(167,139,250,.04) 60%, transparent);
+  transition: transform .2s ease, border-color .2s ease;
+}}
+.inflection:hover {{ transform: translateY(-2px); border-color: var(--border-strong); }}
+.inflection .when {{ color: var(--accent); font-size: 12px; font-weight: 600; letter-spacing: .04em; }}
+.inflection .lift {{
+  font-size: 32px; font-weight: 700; margin: 8px 0 6px; letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}}
+.inflection .lift small {{ font-size: 13px; color: var(--text-dim); font-weight: 500; }}
+.inflection .head a {{ color: var(--text); font-size: 14px; font-weight: 500; }}
+.inflection .head a:hover {{ color: var(--accent); }}
+
+/* filter chips */
+.filterbar {{
+  display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 16px;
+}}
+.chip {{
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 8px 14px; border-radius: 999px;
+  background: var(--bg-card); border: 1px solid var(--border);
+  color: var(--text-dim); font-size: 13px; font-weight: 500;
+  cursor: pointer; user-select: none;
+  transition: all .15s ease;
+}}
+.chip:hover {{ border-color: var(--border-strong); color: var(--text); }}
+.chip[data-active="true"] {{ background: rgba(103,232,249,.1); border-color: rgba(103,232,249,.5); color: var(--text); }}
+.chip .swatch {{ width: 8px; height: 8px; border-radius: 50%; }}
+.chip[data-direction="emerging"] .swatch {{ background: var(--emerging); }}
+.chip[data-direction="rising"] .swatch {{ background: var(--rising); }}
+.chip[data-direction="stable"] .swatch {{ background: var(--stable); }}
+.chip[data-direction="fading"] .swatch {{ background: var(--fading); }}
+.chip .count {{ color: var(--text-muted); font-variant-numeric: tabular-nums; }}
+.search {{
+  flex: 1 1 220px; max-width: 360px; min-width: 200px; margin-left: auto;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 999px;
+  padding: 8px 14px; color: var(--text); font-size: 13px;
+  transition: border-color .15s ease, background .15s ease;
+}}
+.search:focus {{ outline: none; border-color: var(--accent); background: rgba(103,232,249,.04); }}
+
+/* theme cards */
+.theme-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 14px; }}
+.theme-card {{
+  position: relative;
+  padding: 18px; border-radius: var(--radius);
+  background: var(--bg-card); border: 1px solid var(--border);
+  transition: transform .2s ease, border-color .2s ease, box-shadow .2s ease;
+  display: flex; flex-direction: column; gap: 12px;
+}}
+.theme-card:hover {{
+  transform: translateY(-2px); border-color: var(--border-strong);
+  box-shadow: var(--shadow);
+}}
+.theme-card.hidden {{ display: none; }}
+.theme-card .topline {{
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}}
+.dir-badge {{
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+  padding: 4px 10px; border-radius: 6px;
+}}
+.dir-badge[data-direction="emerging"] {{ background: rgba(52,211,153,.12); color: var(--emerging); }}
+.dir-badge[data-direction="rising"]   {{ background: rgba(96,165,250,.12); color: var(--rising); }}
+.dir-badge[data-direction="fading"]   {{ background: rgba(248,113,113,.12); color: var(--fading); }}
+.dir-badge[data-direction="stable"]   {{ background: rgba(148,163,184,.12); color: var(--stable); }}
+.dir-badge .swatch {{ width: 6px; height: 6px; border-radius: 50%; background: currentColor; }}
+.theme-card h3 {{
+  font-size: 18px; font-weight: 600; margin: 0;
+  letter-spacing: -0.015em; line-height: 1.3;
+}}
+.kpis {{
+  display: flex; gap: 18px; align-items: center; color: var(--text-dim); font-size: 12px;
+}}
+.kpis .kpi {{ display: flex; flex-direction: column; gap: 2px; }}
+.kpis .kpi b {{ color: var(--text); font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }}
+.movement {{
+  display: inline-flex; align-items: center; gap: 12px;
+  font-variant-numeric: tabular-nums;
+}}
+.movement .from, .movement .to {{
+  background: rgba(255,255,255,.04); padding: 6px 12px; border-radius: 8px;
+  font-weight: 600; font-size: 18px;
+}}
+.movement .arrow {{ color: var(--accent); font-weight: 700; }}
+.spark {{
+  position: relative; height: 64px; border-radius: 10px;
+  background: rgba(2,6,23,.6); border: 1px solid var(--border);
+  overflow: hidden;
+}}
+.quote-pair {{ display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }}
+.quote {{
+  padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,.025);
+  border-left: 2px solid var(--text-muted);
+  font-size: 13px;
+}}
+.quote.then {{ border-left-color: var(--text-dim); }}
+.quote.now  {{ border-left-color: var(--accent); }}
+.quote .qlabel {{
+  color: var(--text-muted); font-size: 10px; text-transform: uppercase;
+  letter-spacing: .12em; margin-bottom: 4px;
+}}
+.quote a {{ color: var(--text); font-weight: 500; }}
+.quote a:hover {{ color: var(--accent); }}
+.quote p {{ color: var(--text-dim); font-size: 12px; margin: 4px 0 0; line-height: 1.45; }}
+details.evidence {{ margin-top: 4px; }}
+details.evidence summary {{
+  cursor: pointer; color: var(--text-dim); font-size: 12px; padding: 6px 0;
+  list-style: none;
+}}
+details.evidence summary::-webkit-details-marker {{ display: none; }}
+details.evidence summary::after {{ content: ' ›'; transition: transform .2s ease; display: inline-block; }}
+details.evidence[open] summary::after {{ transform: rotate(90deg); }}
+details.evidence ul {{ list-style: none; padding: 0; margin: 8px 0 0; }}
+details.evidence li {{
+  padding: 8px 0; border-top: 1px solid var(--border); font-size: 13px;
+}}
+details.evidence li .meta {{ color: var(--text-muted); font-size: 11px; }}
+details.evidence li a {{ color: var(--text); font-weight: 500; display: block; margin: 2px 0; }}
+details.evidence li a:hover {{ color: var(--accent); }}
+details.evidence li p {{ color: var(--text-dim); font-size: 12px; margin: 2px 0 0; }}
+
+/* entity / vocab */
+.tag-grid {{ display: flex; flex-wrap: wrap; gap: 8px; }}
+.entity {{
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 6px 12px; border-radius: 8px;
+  background: rgba(167,139,250,.08); border: 1px solid rgba(167,139,250,.18);
+  color: var(--text); font-size: 13px; font-weight: 500;
+  transition: all .15s ease;
+}}
+.entity:hover {{ background: rgba(167,139,250,.14); transform: translateY(-1px); }}
+.entity .count {{ color: var(--text-dim); font-size: 11px; font-variant-numeric: tabular-nums; }}
+
+table.vocab {{
+  width: 100%; border-collapse: collapse; font-size: 13px;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+  overflow: hidden;
+}}
+table.vocab thead {{
+  background: rgba(255,255,255,.02);
+}}
+table.vocab th {{
+  text-align: left; padding: 10px 14px; font-weight: 600; color: var(--text-dim);
+  font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+}}
+table.vocab td {{ padding: 10px 14px; border-top: 1px solid var(--border); }}
+table.vocab td:first-child {{ font-weight: 600; }}
+table.vocab .lift-bar {{
+  display: inline-block; height: 4px; border-radius: 2px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  vertical-align: middle; margin-right: 8px;
+}}
+
+/* aside / coverage */
+.layout {{ display: grid; grid-template-columns: 1fr 320px; gap: 24px; align-items: start; margin-top: 24px; }}
+@media (max-width: 980px) {{ .layout {{ grid-template-columns: 1fr; }} }}
+.aside-card {{
+  padding: 18px; border-radius: var(--radius);
+  background: var(--bg-card); border: 1px solid var(--border);
+  margin-bottom: 14px;
+}}
+.aside-card h3 {{
+  margin: 0 0 12px; font-size: 12px; text-transform: uppercase;
+  letter-spacing: .12em; color: var(--text-dim); font-weight: 600;
+}}
+.bar-row {{
+  display: grid; grid-template-columns: 100px 1fr 30px;
+  align-items: center; gap: 10px; margin: 8px 0;
+  font-size: 12px;
+}}
+.bar-row .label {{ color: var(--text-dim); }}
+.bar-track {{
+  height: 6px; border-radius: 999px; background: rgba(148,163,184,.12); overflow: hidden;
+}}
+.bar-fill {{
+  height: 100%; border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width .8s cubic-bezier(.2,.8,.2,1);
+}}
+.bar-row strong {{ text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }}
+.notes {{ list-style: none; padding: 0; margin: 0; }}
+.notes li {{
+  padding: 10px 12px; border-radius: 10px; margin-bottom: 8px;
+  background: rgba(251,191,36,.05); border: 1px solid rgba(251,191,36,.18);
+  color: #fde68a; font-size: 12px; line-height: 1.5;
+}}
+
+/* responsive */
+@media (max-width: 720px) {{
+  .metrics {{ grid-template-columns: 1fr 1fr; }}
+  .quote-pair {{ grid-template-columns: 1fr; }}
+  .nav {{ display: none; }}
+  .hero {{ padding: 32px 0 24px; }}
+}}
+
+/* utility */
+.empty {{ color: var(--text-muted); font-style: italic; padding: 12px 0; }}
+
+/* fade-in stagger */
+@keyframes fadein {{
+  from {{ opacity: 0; transform: translateY(8px); }}
+  to   {{ opacity: 1; transform: translateY(0); }}
+}}
+.theme-card, .inflection, .metric, .entity {{
+  animation: fadein .4s ease both;
+}}
 </style>
 </head>
 <body>
-<main>
-<section class="hero">
-<div class="eyebrow">Trender v{version}</div>
-<h1>{topic}</h1>
-<p class="subtitle">Generated {generated_at} - window {window_start} to {window_end} - retrieval lookback {retrieval_days}d</p>
-{comparison_html}
-<div class="metrics">
-<div class="metric"><strong>{source_count}</strong><span>evidence items</span></div>
-<div class="metric"><strong>{n_themes}</strong><span>themes</span></div>
-<div class="metric"><strong>{n_entities}</strong><span>emerging entities</span></div>
-<div class="metric"><strong>{n_vocab}</strong><span>vocab shifts</span></div>
-</div>
-</section>
-{inflections_html}
-<section class="layout">
-<div>
-{sections_html}
-{entities_html}
-{vocab_html}
-{forward_html}
-</div>
-<aside>
-<section class="panel">
-<h2>Source coverage</h2>
-{source_bars}
-</section>
-<section class="panel">
-<h2>Bucket mix</h2>
-<div class="chips">{bucket_chips}</div>
-</section>
-<section class="panel">
-<h2>Coverage notes</h2>
-<ul class="notes">{notes_html}</ul>
-</section>
-</aside>
-</section>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <span class="brand-dot"></span>
+      Trender
+      <span class="brand-version mono">v{version}</span>
+    </div>
+    <nav class="nav">
+      <a href="#inflections">Inflections</a>
+      <a href="#themes">Themes</a>
+      <a href="#entities">Entities</a>
+      <a href="#vocab">Vocabulary</a>
+      <a href="#forward">Forward</a>
+      <a href="#coverage">Coverage</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container">
+
+  <section class="hero">
+    <span class="eyebrow"><span class="pulse"></span> Trend report · {generated_short}</span>
+    <h1>{topic}</h1>
+    <p class="hero-sub">How this topic moved across <strong>{retrieval_days} days</strong> of evidence — comparing <span class="mono">{comparison_label}</span>.</p>
+    <div class="hero-meta">
+      <span class="tag"><strong>{window_start}</strong> → <strong>{window_end}</strong></span>
+      <span class="tag">window</span>
+      <span class="tag"><strong>{source_count}</strong> evidence items</span>
+    </div>
+
+    <div class="metrics">
+      <div class="metric">
+        <div class="label">Themes</div>
+        <div class="value" data-counter="{n_themes}">{n_themes}</div>
+        <div class="delta">{n_emerging} emerging · {n_rising} rising · {n_stable} stable · {n_fading} fading</div>
+      </div>
+      <div class="metric">
+        <div class="label">Inflections</div>
+        <div class="value" data-counter="{n_inflections}">{n_inflections}</div>
+        <div class="delta">moments of acceleration</div>
+      </div>
+      <div class="metric">
+        <div class="label">New names</div>
+        <div class="value" data-counter="{n_entities}">{n_entities}</div>
+        <div class="delta">entities new to current window</div>
+      </div>
+      <div class="metric">
+        <div class="label">Vocabulary shifts</div>
+        <div class="value" data-counter="{n_vocab}">{n_vocab}</div>
+        <div class="delta">terms with significant lift</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="inflections" class="block">
+    <div class="block-head">
+      <h2>Inflection moments</h2>
+      <span class="hint">weeks where volume jumped vs the prior week</span>
+    </div>
+    <div id="inflection-grid" class="inflection-grid"></div>
+  </section>
+
+  <section id="themes" class="block">
+    <div class="block-head">
+      <h2>Themes</h2>
+      <span class="hint">click a chip to filter · search to narrow further</span>
+    </div>
+    <div class="filterbar" id="filterbar"></div>
+    <div id="theme-grid" class="theme-grid"></div>
+  </section>
+
+  <div class="layout">
+    <div>
+
+      <section id="entities" class="block">
+        <div class="block-head">
+          <h2>New names in the conversation</h2>
+          <span class="hint">capitalized n-grams new to the current window</span>
+        </div>
+        <div id="entity-grid" class="tag-grid"></div>
+      </section>
+
+      <section id="vocab" class="block">
+        <div class="block-head">
+          <h2>Vocabulary drift</h2>
+          <span class="hint">terms with biggest baseline → current frequency lift</span>
+        </div>
+        <div id="vocab-table"></div>
+      </section>
+
+      <section id="forward" class="block">
+        <div class="block-head">
+          <h2>Forward signals</h2>
+          <span class="hint">predictions, roadmaps, forecasts, betting markets</span>
+        </div>
+        <div id="forward-list"></div>
+      </section>
+
+    </div>
+
+    <aside id="coverage">
+      <section class="block aside" style="margin-top:0">
+        <div class="aside-card">
+          <h3>Source coverage</h3>
+          <div id="source-bars"></div>
+        </div>
+        <div class="aside-card">
+          <h3>Bucket mix</h3>
+          <div id="bucket-chips" class="tag-grid"></div>
+        </div>
+        <div class="aside-card">
+          <h3>Coverage notes</h3>
+          <ul id="coverage-notes" class="notes"></ul>
+        </div>
+      </section>
+    </aside>
+  </div>
+
 </main>
+
+<script id="trender-data" type="application/json">{payload_json}</script>
+<script>
+(function() {{
+  const dataEl = document.getElementById('trender-data');
+  const data = JSON.parse(dataEl.textContent);
+  const buckets = data.buckets || [];
+  const themes = data.themes || [];
+
+  const escapeHtml = (s) => String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+  const fmt = (n) => Number.isFinite(n) ? n.toLocaleString() : '0';
+
+  // sparkline as SVG area chart
+  function sparkline(values) {{
+    if (!values || !values.length) return '';
+    const w = 320, h = 64, pad = 4;
+    const n = values.length;
+    const max = Math.max(1, ...values);
+    const step = n > 1 ? (w - pad * 2) / (n - 1) : 0;
+    const points = values.map((v, i) => {{
+      const x = pad + i * step;
+      const y = h - pad - (v / max) * (h - pad * 2);
+      return [x, y];
+    }});
+    const linePath = points.map((p, i) => (i === 0 ? 'M' : 'L') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' ');
+    const areaPath = linePath + ' L ' + points[n-1][0].toFixed(1) + ' ' + (h - pad) + ' L ' + points[0][0].toFixed(1) + ' ' + (h - pad) + ' Z';
+    const dots = points.map((p, i) =>
+      `<circle cx="${{p[0].toFixed(1)}}" cy="${{p[1].toFixed(1)}}" r="2" fill="#67e8f9" opacity="${{values[i] > 0 ? 1 : 0.3}}"/>`
+    ).join('');
+    return `<svg viewBox="0 0 ${{w}} ${{h}}" preserveAspectRatio="none" width="100%" height="${{h}}">
+      <defs>
+        <linearGradient id="sg" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#67e8f9" stop-opacity="0.35"/>
+          <stop offset="100%" stop-color="#67e8f9" stop-opacity="0"/>
+        </linearGradient>
+      </defs>
+      <path d="${{areaPath}}" fill="url(#sg)" stroke="none"/>
+      <path d="${{linePath}}" fill="none" stroke="#67e8f9" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+      ${{dots}}
+    </svg>`;
+  }}
+
+  // counter animation
+  document.querySelectorAll('[data-counter]').forEach(el => {{
+    const target = parseInt(el.getAttribute('data-counter'), 10) || 0;
+    if (target <= 1) {{ el.textContent = target; return; }}
+    const dur = 600;
+    const start = performance.now();
+    function tick(now) {{
+      const t = Math.min(1, (now - start) / dur);
+      const eased = 1 - Math.pow(1 - t, 3);
+      el.textContent = Math.round(target * eased);
+      if (t < 1) requestAnimationFrame(tick);
+    }}
+    requestAnimationFrame(tick);
+  }});
+
+  // inflection cards
+  const inflectionGrid = document.getElementById('inflection-grid');
+  const moments = data.inflection_moments || [];
+  if (!moments.length) {{
+    inflectionGrid.innerHTML = '<p class="empty">No inflection moments detected — volume is steady across the window.</p>';
+  }} else {{
+    inflectionGrid.innerHTML = moments.map(m => {{
+      const head = m.headline || {{}};
+      const headLink = head.url
+        ? `<a href="${{escapeHtml(head.url)}}" target="_blank" rel="noreferrer">${{escapeHtml(head.title || '')}}</a>`
+        : '<span class="empty">no headline</span>';
+      const pct = Math.round((m.lift || 0) * 100);
+      return `<article class="inflection">
+        <div class="when">${{escapeHtml(m.start)}} → ${{escapeHtml(m.end)}}</div>
+        <div class="lift">+${{pct}}% <small>${{m.prior_count}} → ${{m.count}}</small></div>
+        <div class="head">${{headLink}}</div>
+      </article>`;
+    }}).join('');
+  }}
+
+  // direction filter chips
+  const directions = ['emerging', 'rising', 'stable', 'fading'];
+  const counts = directions.reduce((acc, d) => {{
+    acc[d] = themes.filter(t => t.direction === d).length;
+    return acc;
+  }}, {{}});
+  const filterbar = document.getElementById('filterbar');
+  let activeDirs = new Set(directions.filter(d => counts[d] > 0));
+  filterbar.innerHTML = directions.map(d => `
+    <button class="chip" data-direction="${{d}}" data-active="true">
+      <span class="swatch"></span>
+      <span>${{d}}</span>
+      <span class="count">${{counts[d]}}</span>
+    </button>
+  `).join('') + `<input class="search" id="search" placeholder="search themes & evidence…" />`;
+
+  filterbar.querySelectorAll('.chip').forEach(chip => {{
+    chip.addEventListener('click', () => {{
+      const d = chip.getAttribute('data-direction');
+      if (activeDirs.has(d)) {{ activeDirs.delete(d); chip.dataset.active = 'false'; }}
+      else {{ activeDirs.add(d); chip.dataset.active = 'true'; }}
+      applyFilters();
+    }});
+  }});
+  document.getElementById('search').addEventListener('input', applyFilters);
+
+  // theme cards
+  const themeGrid = document.getElementById('theme-grid');
+  if (!themes.length) {{
+    themeGrid.innerHTML = '<p class="empty">No themes detected. Try a broader window or supply --agent-web-file.</p>';
+  }} else {{
+    themeGrid.innerHTML = themes.map((t, idx) => {{
+      const values = buckets.map(b => (t.bucket_counts || {{}})[b.label] || 0);
+      const then = t.then;
+      const now = t.now;
+      const quotePair = (then || now) ? `<div class="quote-pair">
+        ${{ then ? `<div class="quote then">
+          <div class="qlabel">Then · ${{escapeHtml(then.published_at || '')}}</div>
+          <a href="${{escapeHtml(then.url || '#')}}" target="_blank" rel="noreferrer">${{escapeHtml(then.title || '')}}</a>
+          <p>${{escapeHtml((then.snippet || '').slice(0, 220))}}</p>
+        </div>` : '<div></div>' }}
+        ${{ now ? `<div class="quote now">
+          <div class="qlabel">Now · ${{escapeHtml(now.published_at || '')}}</div>
+          <a href="${{escapeHtml(now.url || '#')}}" target="_blank" rel="noreferrer">${{escapeHtml(now.title || '')}}</a>
+          <p>${{escapeHtml((now.snippet || '').slice(0, 220))}}</p>
+        </div>` : '<div></div>' }}
+      </div>` : '';
+      const evidence = (t.evidence || []).filter(Boolean);
+      const evidenceList = evidence.map(e => `<li>
+        <div class="meta">${{escapeHtml(e.published_at || 'unknown')}} · ${{escapeHtml(e.source || '')}} · ${{escapeHtml(e.bucket || '')}}</div>
+        <a href="${{escapeHtml(e.url || '#')}}" target="_blank" rel="noreferrer">${{escapeHtml(e.title || '')}}</a>
+        <p>${{escapeHtml((e.snippet || '').slice(0, 200))}}</p>
+      </li>`).join('');
+      return `<article class="theme-card" data-direction="${{escapeHtml(t.direction)}}" data-search="${{escapeHtml(((t.title || '') + ' ' + evidence.map(e => (e.title || '') + ' ' + (e.snippet || '')).join(' ')).toLowerCase())}}" style="animation-delay:${{Math.min(idx, 12) * 30}}ms">
+        <div class="topline">
+          <span class="dir-badge" data-direction="${{escapeHtml(t.direction)}}"><span class="swatch"></span>${{escapeHtml(t.direction)}}</span>
+          <span style="color:var(--text-muted);font-size:12px" class="mono">slope ${{t.slope}} · momentum ${{t.momentum}}</span>
+        </div>
+        <h3>${{escapeHtml(t.title || 'Untitled')}}</h3>
+        <div class="kpis">
+          <div class="movement">
+            <span class="from">${{t.baseline_count || 0}}</span>
+            <span class="arrow">→</span>
+            <span class="to">${{t.current_count || 0}}</span>
+          </div>
+          <div class="kpi"><span>sources</span><b>${{t.source_diversity || 0}}</b></div>
+          <div class="kpi"><span>evidence</span><b>${{t.evidence_count || 0}}</b></div>
+        </div>
+        <div class="spark">${{sparkline(values)}}</div>
+        ${{quotePair}}
+        ${{evidence.length ? `<details class="evidence">
+          <summary>Evidence (${{evidence.length}})</summary>
+          <ul>${{evidenceList}}</ul>
+        </details>` : ''}}
+      </article>`;
+    }}).join('');
+  }}
+
+  function applyFilters() {{
+    const q = (document.getElementById('search').value || '').toLowerCase().trim();
+    document.querySelectorAll('#theme-grid .theme-card').forEach(card => {{
+      const dirOk = activeDirs.has(card.dataset.direction);
+      const text = card.dataset.search || '';
+      const searchOk = !q || text.includes(q);
+      card.classList.toggle('hidden', !(dirOk && searchOk));
+    }});
+  }}
+
+  // entities
+  const entityGrid = document.getElementById('entity-grid');
+  const entities = data.emerging_entities || [];
+  if (!entities.length) {{
+    entityGrid.innerHTML = '<p class="empty">No new entities detected.</p>';
+  }} else {{
+    entityGrid.innerHTML = entities.slice(0, 24).map(e => {{
+      const ex = e.example || {{}};
+      const href = ex.url ? escapeHtml(ex.url) : '#';
+      const title = ex.title ? escapeHtml(ex.title) : '';
+      return `<a class="entity" href="${{href}}" target="_blank" rel="noreferrer" title="${{title}}">
+        ${{escapeHtml(e.entity)}}
+        <span class="count">${{e.current_count}}×</span>
+      </a>`;
+    }}).join('');
+  }}
+
+  // vocab table
+  const vocabHost = document.getElementById('vocab-table');
+  const vocab = data.vocabulary_drift || [];
+  if (!vocab.length) {{
+    vocabHost.innerHTML = '<p class="empty">No significant vocabulary drift in this window.</p>';
+  }} else {{
+    const maxLift = Math.max(1, ...vocab.map(v => v.lift || 0));
+    vocabHost.innerHTML = `<table class="vocab">
+      <thead><tr><th>term</th><th>lift</th><th>baseline → current</th><th>example</th></tr></thead>
+      <tbody>${{ vocab.slice(0, 20).map(v => {{
+        const ex = v.example || {{}};
+        const exLink = ex.url
+          ? `<a href="${{escapeHtml(ex.url)}}" target="_blank" rel="noreferrer">${{escapeHtml((ex.title || '').slice(0, 70))}}</a>`
+          : '';
+        const barW = Math.max(20, (v.lift / maxLift) * 100);
+        return `<tr>
+          <td>${{escapeHtml(v.term)}}</td>
+          <td><span class="lift-bar" style="width:${{barW.toFixed(0)}}px"></span>${{v.lift}}</td>
+          <td class="mono">${{v.baseline_count}} → ${{v.current_count}}</td>
+          <td>${{exLink}}</td>
+        </tr>`;
+      }}).join('') }}</tbody>
+    </table>`;
+  }}
+
+  // forward signals
+  const forwardHost = document.getElementById('forward-list');
+  const forward = (data.forward_signals || []).filter(Boolean);
+  if (!forward.length) {{
+    forwardHost.innerHTML = '<p class="empty">No forward signals detected. Populate the forecasts bucket via --agent-web-file.</p>';
+  }} else {{
+    forwardHost.innerHTML = '<ul class="notes" style="list-style:none;padding:0">' + forward.slice(0, 10).map(s => `
+      <li style="background:rgba(96,165,250,.06);border-color:rgba(96,165,250,.2);color:var(--text)">
+        <div style="color:var(--text-muted);font-size:11px;margin-bottom:4px">${{escapeHtml(s.published_at || 'unknown')}} · ${{escapeHtml(s.source || '')}}</div>
+        <a href="${{escapeHtml(s.url || '#')}}" target="_blank" rel="noreferrer">${{escapeHtml(s.title || '')}}</a>
+        <p style="color:var(--text-dim);margin:4px 0 0;font-size:12px">${{escapeHtml((s.snippet || '').slice(0, 220))}}</p>
+      </li>
+    `).join('') + '</ul>';
+  }}
+
+  // source bars
+  const sourceCounts = data.source_counts || {{}};
+  const maxSource = Math.max(1, ...Object.values(sourceCounts));
+  document.getElementById('source-bars').innerHTML = Object.entries(sourceCounts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([s, c]) => `<div class="bar-row">
+      <span class="label">${{escapeHtml(s)}}</span>
+      <div class="bar-track"><div class="bar-fill" style="width:${{(c / maxSource) * 100}}%"></div></div>
+      <strong>${{c}}</strong>
+    </div>`).join('') || '<p class="empty">No sources returned evidence.</p>';
+
+  // bucket chips
+  const bucketCounts = data.bucket_counts || {{}};
+  document.getElementById('bucket-chips').innerHTML = Object.entries(bucketCounts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([b, c]) => `<span class="entity">${{escapeHtml(b)}} <span class="count">${{c}}</span></span>`)
+    .join('') || '<span class="empty">none</span>';
+
+  // coverage notes
+  const notes = data.coverage_notes || [];
+  document.getElementById('coverage-notes').innerHTML =
+    notes.length
+      ? notes.map(n => `<li>${{escapeHtml(n)}}</li>`).join('')
+      : '<li style="background:rgba(52,211,153,.05);border-color:rgba(52,211,153,.2);color:#a7f3d0">All checks passed.</li>';
+
+  // smooth scroll for nav
+  document.querySelectorAll('.nav a').forEach(a => {{
+    a.addEventListener('click', (e) => {{
+      const id = a.getAttribute('href').slice(1);
+      const el = document.getElementById(id);
+      if (el) {{ e.preventDefault(); el.scrollIntoView({{behavior: 'smooth', block: 'start'}}); }}
+    }});
+  }});
+}})();
+</script>
+
 </body>
 </html>"""
 
