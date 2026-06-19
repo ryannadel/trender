@@ -2090,13 +2090,31 @@ def write_stdout(text: str) -> None:
 
 
 def open_html_report(path: Path) -> None:
-    try:
-        webbrowser.open(path.resolve().as_uri())
-    except Exception:
-        if os.name == "nt":
-            os.startfile(str(path.resolve()))  # type: ignore[attr-defined]
-        else:
-            raise
+    resolved = path.resolve()
+    uri = resolved.as_uri()
+
+    if webbrowser.open(uri):
+        return
+
+    if os.name == "nt":
+        os.startfile(str(resolved))  # type: ignore[attr-defined]
+        return
+
+    for command, target in (
+        ("wslview", str(resolved)),
+        ("xdg-open", uri),
+        ("open", str(resolved)),
+    ):
+        if shutil.which(command):
+            subprocess.Popen(
+                [command, target],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return
+
+    raise RuntimeError(f"Could not find a browser opener for {resolved}")
 
 
 if __name__ == "__main__":
