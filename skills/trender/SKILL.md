@@ -1,6 +1,6 @@
 ---
 name: trender
-version: "0.6.0"
+version: "0.7.0"
 description: "Map how a topic is evolving across time. The host agent does bucketed deep web research; Trender clusters, scores momentum, surfaces emerging entities and vocabulary drift, and renders a trend map."
 argument-hint: 'trender "agentic AI" --days=90 | trender "MCP servers" --compare=7,30 | trender "AI coding agents" --from=2026-01-01 --to=2026-06-01 --emit=html'
 allowed-tools: Bash, Read, Write, AskUserQuestion, WebSearch
@@ -46,12 +46,13 @@ metadata:
 Trender is **agent-native by design**. The host coding agent is the *primary* researcher: it does bucketed deep web research first, hands the JSON to Trender, and Trender layers community signal (via bundled `last30days`) plus trend analytics on top.
 
 What Trender produces:
+- **Bottom line up front (BLUF)** — a few scannable bullets, authored by the host agent, that lead the report.
 - **Inflection moments** — biggest week-over-week jumps in volume, with the headline that broke that week.
 - **Emerging / Accelerating / Fading / Stable themes** — TF-IDF clusters with linear-regression slope and momentum.
 - **Then → Now quote pairs** per theme.
 - **Emerging entities** — capitalized n-grams new to the current window.
 - **Vocabulary drift** — terms with biggest baseline → current frequency lift.
-- **Forward signals** — predictions, roadmaps, forecasts, betting markets.
+- **Forward signals** — predictions, roadmaps, forecasts, betting markets, categorized with type badges and a horizon year.
 - A self-contained HTML trend map and a Markdown synthesis.
 
 ## STEP 0 — Bucketed deep research (REQUIRED)
@@ -89,11 +90,37 @@ Write to `agent-web.json`:
 
 Legacy `{"items":[...]}` is still accepted; bucket is inferred from content.
 
+## STEP 0.6 — Author the bottom line (BLUF)
+
+After Step 0 research and after reading Trender's analysis, the host agent should
+**write the bottom-line-up-front bullets itself** — the same way it authors the rest of
+the synthesis — and hand them back via `--narrative-file`. These bullets lead the report
+and are what most readers scan first.
+
+Write to `narrative.json`:
+
+```json
+{
+  "bluf": [
+    "Plain bullet string.",
+    {"text": "Bullet backed by a source.", "url": "https://..."}
+  ],
+  "forward_outlook": "One-line 'what's coming next' takeaway (optional)."
+}
+```
+
+- `bluf` accepts plain strings or `{"text", "url"}` objects. A Markdown bullet list
+  (`{"bluf_md": "- ...\n- ..."}` or a `.md` file) is also accepted.
+- `forward_outlook` leads the Forward signals section.
+- If `--narrative-file` is omitted, Trender renders a clearly-labeled **auto-generated**
+  BLUF derived from the strongest computed signals. This is a fallback, not a substitute
+  for the agent's synthesis — author the bullets whenever possible.
+
 ## Usage
 
 ```bash
-# RECOMMENDED — agent runs Step 0 first, then:
-python3 "$SKILL_DIR/scripts/trender.py" "MCP servers" --agent-web-file ./agent-web.json
+# RECOMMENDED — agent runs Step 0, authors narrative.json, then:
+python3 "$SKILL_DIR/scripts/trender.py" "MCP servers" --agent-web-file ./agent-web.json --narrative-file ./narrative.json
 
 # With explicit comparison window (default is 30 vs 180 if nothing specified):
 python3 "$SKILL_DIR/scripts/trender.py" "agentic AI" --compare=30,180 --agent-web-file ./agent-web.json
@@ -133,9 +160,11 @@ This is intentionally narrower than v0.5. Most "trend" signal does not come from
 
 1. **Run Step 0 first.** Skipping it makes Trender a worse `last30days`.
 2. **Pass `--agent-web-file`** with bucketed JSON.
-3. Pass through Trender's Markdown synthesis. The HTML is the primary deliverable; mention its saved path.
-4. Every claim in the report must trace back to evidence with a URL. Do not invent.
-5. If a bucket comes back empty, the report will say so under "Coverage notes" — don't hide that.
+3. **Author the BLUF.** Write the bottom-line bullets (and optional `forward_outlook`) to
+   `narrative.json` and pass `--narrative-file`. Don't rely on the auto-generated fallback.
+4. Pass through Trender's Markdown synthesis. The HTML is the primary deliverable; mention its saved path.
+5. Every claim in the report must trace back to evidence with a URL. Do not invent.
+6. If a bucket comes back empty, the report will say so under "Coverage notes" — don't hide that.
 
 ## Override bundled last30days
 
