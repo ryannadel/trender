@@ -1,0 +1,11 @@
+{
+  "name": "trender",
+  "description": "Trend research skill for comparing how topics change across time windows and rendering evidence-backed HTML trend maps.",
+  "version": "0.6.0",
+  "author": {
+    "name": "ryannadel"
+  },
+  "homepage": "https://github.com/ryannadel/trender",
+  "repository": "https://github.com/ryannadel/trender",
+  "license": "MIT"
+}

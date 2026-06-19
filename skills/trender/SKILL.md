@@ -1,41 +1,15 @@
 ---
 name: trender
-version: "0.6.0"
 description: "Map how a topic is evolving across time. The host agent does bucketed deep web research; Trender clusters, scores momentum, surfaces emerging entities and vocabulary drift, and renders a trend map."
-argument-hint: 'trender "agentic AI" --days=90 | trender "MCP servers" --compare=7,30 | trender "AI coding agents" --from=2026-01-01 --to=2026-06-01 --emit=html'
-allowed-tools: Bash, Read, Write, AskUserQuestion, WebSearch
-homepage: https://github.com/your-org/trender-skill
-repository: https://github.com/your-org/trender-skill
-author: ryannadel
 license: MIT
-user-invocable: true
+compatibility: "Requires Python 3.12+ and shell access to run scripts/trender.py. Optional web/network access and source credentials improve evidence collection."
 metadata:
-  openclaw:
-    emoji: "📈"
-    requires:
-      env: []
-      optionalEnv:
-        - LAST30DAYS_SKILL_DIR
-        - SCRAPECREATORS_API_KEY
-        - XAI_API_KEY
-        - OPENROUTER_API_KEY
-        - PARALLEL_API_KEY
-        - APIFY_API_TOKEN
-        - AUTH_TOKEN
-        - CT0
-        - BSKY_HANDLE
-        - BSKY_APP_PASSWORD
-    bins:
-      - python3
-    tags:
-      - trends
-      - deep-research
-      - last30days
-      - multi-source
-      - time-series
-      - social-media
-      - analysis
-      - html
+  version: "0.6.0"
+  author: "ryannadel"
+  homepage: "https://github.com/ryannadel/trender"
+  repository: "https://github.com/ryannadel/trender"
+  optional_env: "LAST30DAYS_SKILL_DIR,SCRAPECREATORS_API_KEY,XAI_API_KEY,OPENROUTER_API_KEY,PARALLEL_API_KEY,APIFY_API_TOKEN,AUTH_TOKEN,CT0,BSKY_HANDLE,BSKY_APP_PASSWORD"
+  tags: "trends,deep-research,last30days,multi-source,time-series,social-media,analysis,html"
 ---
 
 # Trender Skill

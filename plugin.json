@@ -1,0 +1,20 @@
+{
+  "name": "trender",
+  "description": "Package the Trender agent skill for time-windowed trend research, evidence clustering, momentum scoring, and HTML trend-map reports.",
+  "version": "0.6.0",
+  "author": {
+    "name": "ryannadel"
+  },
+  "homepage": "https://github.com/ryannadel/trender",
+  "repository": "https://github.com/ryannadel/trender",
+  "license": "MIT",
+  "keywords": [
+    "trends",
+    "research",
+    "agent-skills",
+    "last30days",
+    "html"
+  ],
+  "category": "Productivity",
+  "skills": "skills/"
+}
