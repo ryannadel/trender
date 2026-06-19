@@ -1,0 +1,37 @@
+{
+  "name": "trender",
+  "version": "0.7.0",
+  "description": "Trend research skill for comparing how topics change across time windows and rendering evidence-backed HTML trend maps.",
+  "author": {
+    "name": "ryannadel"
+  },
+  "homepage": "https://github.com/ryannadel/trender",
+  "repository": "https://github.com/ryannadel/trender",
+  "license": "MIT",
+  "keywords": [
+    "trends",
+    "research",
+    "agent-skills",
+    "last30days",
+    "html"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Trender",
+    "shortDescription": "Map topic momentum across flexible time windows.",
+    "developerName": "ryannadel",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write",
+      "Shell",
+      "Web"
+    ],
+    "websiteURL": "https://github.com/ryannadel/trender",
+    "defaultPrompt": [
+      "Use Trender to map how agentic AI has evolved over the last 90 days.",
+      "Use Trender to compare MCP server trends over the last 7 and 30 days."
+    ],
+    "brandColor": "#3B82F6"
+  }
+}

@@ -11,14 +11,16 @@ The host coding agent also authors the **bottom-line-up-front (BLUF)** summary â
 ## Install
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-skill.ps1 -Force
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-skill.ps1 -Agent copilot -Force
 ```
 
 Or from the repository root:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\skills\trender\scripts\install-skill.ps1 -Force
+powershell -NoProfile -ExecutionPolicy Bypass -File .\skills\trender\scripts\install-skill.ps1 -Agent copilot -Force
 ```
+
+Use `-Agent claude` for `~/.claude/skills/trender` or `-Agent codex` for `~/.agents/skills/trender`.
 
 ## Examples
 
