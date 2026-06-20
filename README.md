@@ -42,6 +42,7 @@ If no narrative file is provided, Trender renders a clearly labeled auto-generat
 plugin.json                    GitHub Copilot CLI plugin manifest
 .claude-plugin/plugin.json      Claude Code plugin manifest
 .codex-plugin/plugin.json       Codex plugin manifest
+LICENSE                        MIT license included in built archives
 skills/trender/SKILL.md         Agent skill instructions and metadata
 skills/trender/README.md        README packaged inside the skill archive
 skills/trender/scripts/         CLI, installer, and build scripts
@@ -226,7 +227,7 @@ dist\trender-plugin.zip  Plugin archive with Copilot, Claude, and Codex manifest
 
 ## Public release checklist
 
-Before publishing, make sure the repository includes a root license file matching the MIT license declared in the manifests, rebuild `dist/` after documentation or code changes, and run a mock smoke test:
+Before publishing, confirm the root `LICENSE` matches the MIT license declared in the manifests, rebuild `dist/` after documentation or code changes, and run a mock smoke test:
 
 ```powershell
 python .\skills\trender\scripts\trender.py "MCP servers" --mock --emit=all --no-open

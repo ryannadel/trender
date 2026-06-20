@@ -3,6 +3,7 @@ $ErrorActionPreference = "Stop"
 $SkillDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $Root = (Resolve-Path (Join-Path $SkillDir "..\..")).Path
 $Dist = Join-Path $Root "dist"
+$License = Join-Path $Root "LICENSE"
 New-Item -ItemType Directory -Force -Path $Dist | Out-Null
 
 function Copy-SkillContent {
@@ -14,6 +15,9 @@ function Copy-SkillContent {
     New-Item -ItemType Directory -Force -Path $Destination | Out-Null
     Copy-Item (Join-Path $SkillDir "SKILL.md") $Destination -Force
     Copy-Item (Join-Path $SkillDir "README.md") $Destination -Force
+    if (Test-Path $License) {
+        Copy-Item $License $Destination -Force
+    }
     Copy-Item (Join-Path $SkillDir "scripts") $Destination -Recurse -Force
     if (Test-Path (Join-Path $SkillDir "vendor")) {
         Copy-Item (Join-Path $SkillDir "vendor") $Destination -Recurse -Force
@@ -48,6 +52,9 @@ try {
     Copy-Item (Join-Path $Root ".claude-plugin") $PluginStage -Recurse -Force
     Copy-Item (Join-Path $Root ".codex-plugin") $PluginStage -Recurse -Force
     Copy-Item (Join-Path $Root "README.md") $PluginStage -Force
+    if (Test-Path $License) {
+        Copy-Item $License $PluginStage -Force
+    }
     Copy-SkillContent -Destination (Join-Path $PluginStage "skills\trender")
 
     $PluginTempArchive = Join-Path ([System.IO.Path]::GetTempPath()) ("trender-plugin." + [guid]::NewGuid().ToString("N") + ".zip")
