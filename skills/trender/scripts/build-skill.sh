@@ -23,6 +23,9 @@ def write_skill(zf, prefix=""):
     for path in [skill_dir / "SKILL.md", skill_dir / "README.md"]:
         if path.exists():
             zf.write(path, str(Path(prefix) / path.relative_to(skill_dir)))
+    license_path = root_dir / "LICENSE"
+    if license_path.exists():
+        zf.write(license_path, str(Path(prefix) / "LICENSE"))
     for skill_root in [skill_dir / "scripts", skill_dir / "vendor", skill_dir / "agents"]:
         if not skill_root.exists():
             continue
@@ -39,7 +42,7 @@ with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
     write_skill(zf)
 
 with zipfile.ZipFile(plugin_archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-    for path in [root_dir / "plugin.json", root_dir / "README.md"]:
+    for path in [root_dir / "plugin.json", root_dir / "README.md", root_dir / "LICENSE"]:
         if path.exists():
             zf.write(path, path.relative_to(root_dir))
     for plugin_dir in [root_dir / ".claude-plugin", root_dir / ".codex-plugin"]:
